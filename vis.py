@@ -4,6 +4,8 @@ import os
 import numpy as np
 from scipy.signal import hilbert, savgol_filter, find_peaks, welch
 import pandas as pd
+from scipy.integrate import simpson
+
 
 # === File paths ===
 baser_path = os.path.join("PPG-Sleepiness-Detection", "data")
@@ -101,9 +103,6 @@ idx = xf >= 0
 xf = xf[idx]
 yf = np.abs(yf[idx])  # magnitude
 
-frequencies, power = welch(y, fs=fs, nperseg=16384)
-
-
 
 # === Biometric Calculation ===
 peak_times = (peaks * time_interval) + start_time
@@ -129,6 +128,69 @@ filtered_rr_intervals = np.diff(filtered_peak_times)
 heart_rate = 60 / np.mean(filtered_rr_intervals)
 hrv = np.std(filtered_rr_intervals)
 
+# === LF/HF Ratio ===
+fs = 4  # resample rate (Hz)
+t = np.arange(0, 150, 1/fs)
+
+cumulative_time = np.cumsum(filtered_rr_intervals)
+uniform_time = np.linspace(0, cumulative_time[-1], len(t))
+NNI_interp = np.interp(uniform_time, cumulative_time, filtered_rr_intervals[:len(cumulative_time)])
+
+# bandpass
+def bandpass(data, lowcut, highcut, fs):
+    nyq = 0.5 * fs
+    b, a = butter(4, [lowcut/nyq, highcut/nyq], btype='band')
+    return filtfilt(b, a, data)
+
+LF = bandpass(NNI_interp, 0.04, 0.15, fs)
+HF = bandpass(NNI_interp, 0.15, 0.4, fs)
+
+# hilbert
+LFiA = np.abs(hilbert(LF))
+HFiA = np.abs(hilbert(HF))
+
+# average
+window_len = 150 * fs  # 300s * fs
+step_size = 5 * fs    # 10s * fs
+
+LFiA_mean = []
+HFiA_mean = []
+
+def trimmed_mean(x, trim=0.2):
+    x_sorted = np.sort(x)
+    n = len(x_sorted)
+    x_trimmed = x_sorted[int(n*trim):int(n*(1-trim))]
+    return np.mean(x_trimmed)
+
+for start in range(0, len(LFiA) - window_len + 1, step_size):
+    lw = LFiA[start:start + window_len]
+    hw = HFiA[start:start + window_len]
+    LFiA_mean.append(trimmed_mean(lw))
+    HFiA_mean.append(trimmed_mean(hw))
+
+# final
+LF_HF_ratio = np.array(LFiA_mean) / np.array(HFiA_mean)
+print("LF HF RATIO:")
+print(LF_HF_ratio)
+
+
+# psd
+freqs, psd = welch(filtered_rr_intervals, fs=fs, nperseg=256)
+
+# Define LF and HF bands
+lf_band = (0.04, 0.15)
+hf_band = (0.15, 0.4)
+
+# Find indices of frequencies in each band
+lf_idx = np.logical_and(freqs >= lf_band[0], freqs <= lf_band[1])
+hf_idx = np.logical_and(freqs >= hf_band[0], freqs <= hf_band[1])
+
+# Integrate the PSD over the frequency bands using Simpson’s rule
+lf_power = simps(psd[lf_idx], freqs[lf_idx])
+hf_power = simps(psd[hf_idx], freqs[hf_idx])
+
+lf_hf_ratio = lf_power / hf_power if hf_power > 0 else np.nan
+
 # === Plot 1: Smoothed and Raw in Window 1 ===
 plt.figure(1, figsize=(12, 6))
 plt.plot(x_filtered, ir_smooth, label='IR Smoothed')
@@ -146,7 +208,7 @@ plt.tight_layout()
 # === Plot 2: High Pass Detrend in Window 2 ===
 plt.figure(2, figsize=(12, 6))
 plt.plot(x_filtered, hpfiltered, label='High Pass Detrended', color='purple')
-plt.plot(filtered_peak_times, hpfiltered[filtered_peaks], 'ro', label="Peaks")
+plt.plot(filtered_peak_times, hpfiltered[filtered_peaks], 'ro', label="Peaks", markersize = 2)
 
 stats_text = f"Heart Rate: {heart_rate:.1f} BPM\nHRV (std RR): {hrv:.3f} s"
 plt.text(0.83, 0.6, stats_text, transform=plt.gca().transAxes, fontsize=12, 
@@ -162,10 +224,18 @@ plt.tight_layout()
 
 # === Plot 3: FFT ===
 plt.figure(3, figsize=(12, 6))
-plt.semilogy(frequencies, power)
+plt.plot(xf, yf, label='High Pass Detrended', color='purple')
 plt.title("FFT of the Signal")
 plt.xlabel("Frequency (Hz)")
 plt.ylabel("Amplitude")
+plt.grid(True)
+
+# === Plot 4: RR-Interval PSD ===
+plt.figure(4, figsize=(8, 6))
+plt.scatter(HFiA_mean, LFiA_mean, c='blue', alpha=0.6)
+plt.xlabel('HFiA (Instantaneous Amplitude HF)')
+plt.ylabel('LFiA (Instantaneous Amplitude LF)')
+plt.title('2D LF-HF Scatter Plot (Stress Analysis)')
 plt.grid(True)
 
 
