@@ -8,7 +8,7 @@ print("Recording... Press 'k' to stop early.")
 
 try:
     while proc.poll() is None:  # While it's still running
-        time.sleep(0.1)
+        time.sleep(1)
         if msvcrt.kbhit():
             key = msvcrt.getch().decode().lower()
             if key == 'k':

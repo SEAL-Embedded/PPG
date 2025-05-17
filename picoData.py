@@ -9,6 +9,7 @@ if os.path.exists(filename):
     os.remove(filename)
     print(f"Deleted existing {filename}")
 
+# Use newline='' for consistent line endings across platforms
 with open(filename, "w", newline='') as f:
     writer = csv.writer(f)
 
@@ -17,10 +18,15 @@ with open(filename, "w", newline='') as f:
         while True:
             line = ser.readline().decode().strip()
             if line:
-                writer.writerow([line])  # Wrap line in list to write as a row
-                f.flush()
-                print(line)
+                parts = line.split(',')
+                if len(parts) == 2:
+                    # Remove accidental line breaks inside parts
+                    parts = [p.strip() for p in parts]
+                    writer.writerow(parts)
+                    f.flush()
+                    print(', '.join(parts))  # Just for console clarity
+                else:
+                    print(f"Skipping malformed line: {line}")
     except KeyboardInterrupt:
         print("\nStopped.")
         ser.close()
-
