@@ -50,8 +50,8 @@ x_values = [i * time_interval for i in range(len(ir_data))]
 actual_sampling_rate = 1/time_interval
 
 # === CONTROL: Time range to plot (in seconds) ===
-start_time = 2   # set this to your desired start
-end_time = 182     # set this to your desired end
+start_time = 50   # set this to your desired start
+end_time = 500     # set this to your desired end
 
 # === Filter data based on time range ===
 filtered_indices = [i for i, t in enumerate(x_values) if start_time <= t <= end_time]
