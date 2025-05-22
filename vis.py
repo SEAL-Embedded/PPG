@@ -138,6 +138,7 @@ filtered_peak_times = np.array(filtered_peaks) * time_interval + start_time
 filtered_rr_intervals = np.diff(filtered_peak_times)
 
 heart_rate = 60 / np.mean(filtered_rr_intervals)
+bps = heart_rate / 60
 hrv = np.std(filtered_rr_intervals)
 
 # === LF/HF Ratio ===
@@ -155,7 +156,8 @@ dominant_freq = frequencies[mask_heart][np.argmax(psd[mask_heart])]
 heart_rate_bpm = dominant_freq * 60  # Convert Hz to BPM
 
 # Calculate SNR (Heart band vs Noise band)
-noise_band_low = (0.1, 0.5)   # Very low frequency noise
+noise_band_low = (bps-0.2, bps+0.2)   # Very low frequency noise
+first_harmonic = (bps*2-0.2, bps*2+0.2)
 noise_band_high = (4.0, 10.0) # Higher frequency noise
 mask_noise = ((frequencies >= noise_band_low[0]) & (frequencies <= noise_band_low[1])) | \
              ((frequencies >= noise_band_high[0]) & (frequencies <= noise_band_high[1]))
@@ -211,7 +213,9 @@ plt.ylabel('Power Spectral Density (V²/Hz)')
 plt.title(f'PPG Power Spectral Density\nDominant HR: {heart_rate_bpm:.1f} BPM | SNR: {snr:.2f}')
 
 # Add heart rate band shading
-plt.axvspan(heart_band[0], heart_band[1], color='green', alpha=0.1, label='Heart Rate Band')
+plt.axvspan(noise_band_low[0], noise_band_low[1], color='green', alpha=0.1, label='Heart Rate Band')
+plt.axvspan(first_harmonic[0], first_harmonic[1], color='green', alpha=0.1, label='First Harmonic Heart Rate Band')
+
 plt.axvline(dominant_freq, color='red', linestyle='--', label=f'Dominant Frequency ({dominant_freq:.2f} Hz)')
 plt.axvline(dominant_freq*2, color='purple', linestyle='--', label=f'Dominant Frequency ({dominant_freq*2:.2f} Hz)')
 plt.axvline(dominant_freq*3, color='purple', linestyle='--', label=f'Dominant Frequency ({dominant_freq*3:.2f} Hz)')
