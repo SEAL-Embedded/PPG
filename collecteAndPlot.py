@@ -21,7 +21,7 @@ except KeyboardInterrupt:
 
 # === Wait for it to clean up ===
 proc.wait()
-
+        
 # === Run analysis or postprocessing ===
 print("Running next script...")
 subprocess.run(["python", "vis.py"])
