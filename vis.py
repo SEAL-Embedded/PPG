@@ -13,7 +13,7 @@ base_path = os.path.join(baser_path, "firstTests")
 ir_path = os.path.join(base_path, "belle.csv")
 
 # === Load IR data ===
-with open("data\\firstTests\\longm.csv", 'r') as file:
+with open("data\\firstTests\\21_middle.csv", 'r') as file:
     reader = csv.reader(file)
     
     # Read all rows once and extract timestamps and IR data
@@ -24,19 +24,18 @@ with open("data\\firstTests\\longm.csv", 'r') as file:
             rawtimestamps.append(float(row[0]))  # Column 0 = timestamp
             ir_data.append(float(row[1]))        # Column 1 = PPG signal
 
-print(len(rawtimestamps))
-print(len(ir_data))
 
-time_interval = 1/394  # 1/200
+time_interval = 1/400  # 1/200
 time_interval_us = (int)(time_interval * 1e6)  # Convert to microseconds
 x_values = [i * time_interval for i in range(len(ir_data))]
 actual_sampling_rate = 1/time_interval
 
 corrected_timestamps = np.array(rawtimestamps, dtype=np.int64)  # Convert to numpy array for easier manipulation
+print(len(corrected_timestamps))
 for i in range(1, len(corrected_timestamps)):
         time_diff = corrected_timestamps[i] - corrected_timestamps[i-1]
 
-        if time_diff > 100000:
+        if abs(time_diff) > 50000:
             print(f"\n--- Detected jump at index {i} ---")
             print(f"  Previous timestamp: {corrected_timestamps[i-1]} us")
             print(f"  Current (uncorrected) timestamp: {corrected_timestamps[i]} us")
@@ -64,20 +63,23 @@ for i in range(1, len(corrected_timestamps)):
 timestamps_seconds = np.array(corrected_timestamps) / 1e6  # µs → seconds
 start_time = timestamps_seconds[0]
 timestamps = timestamps_seconds - start_time  # Now starts at 0
-
 start_time = timestamps[0]
+print("useless")
+print("start time:", start_time)
 end_time = timestamps[-1]
 num_samples = int(np.ceil((end_time - start_time) * actual_sampling_rate))
 uniform_timestamps = np.linspace(start_time, end_time, num_samples)
 interpolator = interp1d(timestamps, ir_data, kind='cubic', fill_value='extrapolate')
 resampled_signal = interpolator(uniform_timestamps)
 
+print("new time")
+print(len(uniform_timestamps))
 # === Time axis (assuming 200 Hz sampling) ===
 
 
 # === CONTROL: Time range to plot (in seconds) ===
-start_time = 3   # set this to your desired start
-end_time = 573     # set this to your desired end
+start_time = 20   # set this to your desired start
+end_time = 320     # set this to your desired end
 
 # === Filter data based on time range ===
 filtered_indices = [i for i, t in enumerate(x_values) if start_time <= t <= end_time]
@@ -125,8 +127,9 @@ def bandpass(data, lowcut=0.5, highcut=10, fs=50, order=2):
 hpfiltered = bandpass(ir_smooth, lowcut=0.6, highcut=3.3, fs=actual_sampling_rate)
 
 # === Peak Finding ===
-peaks, props = find_peaks(hpfiltered, prominence=8, width = 0.2, distance = 0.48*actual_sampling_rate)
+peaks, props = find_peaks(hpfiltered, prominence=8, width = 0.2, distance = 0.55*actual_sampling_rate)
 
+'''
 # === FFT ===
 y = hpfiltered  # your filtered signal
 fs = actual_sampling_rate  # your sampling rate, e.g., 50 Hz
@@ -139,14 +142,11 @@ idx = xf >= 0
 xf = xf[idx]
 yf = np.abs(yf[idx])  # magnitude
 
-
+'''
 # === Biometric Calculation ===
 peak_times = np.array(peaks * time_interval) + start_time
-print(peak_times)
 rr_intervals = np.diff(peak_times)
-print(rr_intervals)
 median_rr = np.median(rr_intervals)
-print(median_rr)
 
 filtered_peaks = [peaks[0]]
 for i in range(1, len(peak_times)):
@@ -154,13 +154,10 @@ for i in range(1, len(peak_times)):
     if 0.5 * median_rr < rr < 1.7 * median_rr:
         filtered_peaks.append(peaks[i])
 
-print(filtered_peaks)
 # Recalculate using filtered peaks
 filtered_peak_times = np.array(filtered_peaks) * time_interval + start_time
 filtered_rr_intervals = np.diff(filtered_peak_times)
-
-print("send these to hudson")
-print(filtered_rr_intervals)
+print(filtered_peak_times)
 
 with open('output_column.csv', 'w', newline='') as file:
     writer = csv.writer(file)
@@ -172,7 +169,9 @@ heart_rate = 60 / np.mean(filtered_rr_intervals)
 bps = heart_rate / 60
 hrv = np.std(filtered_rr_intervals)
 
-# === LF/HF Ratio ===
+
+
+'''
 # === LF/HF Ratio ===
 sampling_rate_hz=4
 segment_length_s=570
@@ -207,8 +206,6 @@ f_interp = interp1d(unique_r_peak_times, filtered_rr_intervals[unique_rr_interva
 # Get the interpolated RR interval series (in seconds)
 interpolated_rr_s = f_interp(time_interp)
 
-print(f"Original RR intervals count: {len(filtered_rr_intervals)}")
-print(f"Resampled time series length: {len(interpolated_rr_s)} points at {sampling_rate_hz} Hz")
 
 # --- 3. Detrending (Optional but Recommended) ---
 # Remove linear trend from the interpolated signal to improve PSD estimation
@@ -275,6 +272,7 @@ hf_norm = (hf_power / (lf_power + hf_power)) * 100 if (lf_power + hf_power) > 0 
 # Calculate LF/HF Ratio
 lf_hf_ratio = lf_power / hf_power if hf_power > 0 else np.inf # Handle division by zero
 
+
 print("\n--- HRV Frequency Domain Analysis Results ---")
 print(f"Total Power: {total_power:.2f} ms^2")
 print(f"VLF Power: {vlf_power:.2f} ms^2 (Band: {VLF_band[0]}-{VLF_band[1]} Hz)")
@@ -286,27 +284,25 @@ print(f"LF/HF Ratio: {lf_hf_ratio:.2f}")
 
 
 
-
+'''
 # === SNR ===
 fs = 400
-frequencies, psd = welch(resampled_signal, 
+frequencies, psd = welch(ir_raw_filtered, 
                         fs=fs, 
                         nperseg=8192,  # Window size
                         noverlap=4096,  # Overlap between segments
                         scaling='density')
 
-# Find dominant heart rate frequency
-heart_band = (0.5, 4.0)  # 0.5-4 Hz (30-240 BPM)
+
 
 # Calculate SNR (Heart band vs Noise band)
-plusminusrange = 0.05
+plusminusrange = 0.1
+print("BPS")
+print(bps)
 heart_rate_range = (bps-plusminusrange, bps+plusminusrange)   # Very low frequency noise
 first_harmonic = (bps*2-plusminusrange, bps*2+plusminusrange)
 second_harmonic = (bps*3-plusminusrange, bps*3+plusminusrange)
 
-noise_band_high = (4.0, 10.0) # Higher frequency noise
-
-mask_heart = ((frequencies >= heart_rate_range[0]) & (frequencies <= heart_rate_range[1]) | (frequencies >= first_harmonic[0]) & (frequencies <= first_harmonic[1]) | (frequencies >= second_harmonic[0]) & (frequencies <= second_harmonic[1]))
 
 zero_mask = (frequencies >= heart_rate_range[0]) & (frequencies <= heart_rate_range[1])
 first_mask = (frequencies >= first_harmonic[0]) & (frequencies <= first_harmonic[1])
@@ -316,23 +312,32 @@ first_h_area = simpson(psd[first_mask], frequencies[first_mask])
 second_h_area = simpson(psd[second_mask], frequencies[second_mask])
 heart_area = zero_h_area + first_h_area + second_h_area
 
+mask_all = ((frequencies >= 0.5) & (frequencies <= 15))
 
 
-dominant_freq = frequencies[mask_heart][np.argmax(psd[mask_heart])]
+dominant_freq = frequencies[mask_all][np.argmax(psd[mask_all])]
 heart_rate_bpm = dominant_freq * 60  # Convert Hz to BPM
 
 
-mask_all = ((frequencies >= 0.5) & (frequencies <= 15))
 
 all_area = simpson(psd[mask_all], frequencies[mask_all])
-print("all_area", all_area)
 noise_area = simpson(psd[mask_all], frequencies[mask_all]) - heart_area
-print("noise_area", noise_area)
-print("heart_area", heart_area)
 
 snr = heart_area / noise_area
+print(snr)
+
+
+# === calculating APA ===
+peak_values = hpfiltered[filtered_peaks]
+
+# 2. Calculate the average of these peak values
+average_peak_value = np.mean(peak_values)
+
+# 3. Print the result
+print(average_peak_value)
 
 # === Plot 1: Smoothed and Raw in Window 1 ===
+
 plt.figure(1, figsize=(12, 6))
 plt.plot(x_values, ir_data, label='IR Smoothed')
 plt.plot(x_raw_filtered, ir_raw_filtered, 'o', label='IR Raw', markersize=3)
@@ -364,14 +369,18 @@ plt.xlim(start_time, max(x_filtered)+5)
 plt.grid(True)
 plt.tight_layout()
 
+
+
+'''
 # === Plot 3: FFT ===
 plt.figure(3, figsize=(12, 6))
 plt.plot(xf, yf, label='High Pass Detrended', color='purple')
 plt.title("FFT of the Signal")
 plt.xlabel("Frequency (Hz)")
 plt.ylabel("Amplitude")
+plt.xlim(0, 9)  # Limit x-axis to 10 Hz for better visibility
 plt.grid(True)
-
+'''
 # === Plot 4: PSD ===
 plt.figure(4, figsize=(12, 6))
 plt.plot(frequencies, psd, label='PSD')
@@ -387,29 +396,28 @@ plt.axvline(dominant_freq, color='red', linestyle='--', label=f'Dominant Frequen
 plt.axvline(dominant_freq*2, color='purple', linestyle='--', label=f'Dominant Frequency ({dominant_freq*2:.2f} Hz)')
 plt.axvline(dominant_freq*3, color='purple', linestyle='--', label=f'Dominant Frequency ({dominant_freq*3:.2f} Hz)')
 plt.axvline(dominant_freq*4, color='purple', linestyle='--', label=f'Dominant Frequency ({dominant_freq*4:.2f} Hz)')
+plt.xlim(0.5, 10)
+plt.ylim(0, np.max(psd) * 1.1)  # Set y-axis limit to 110% of max PSD value
 
 
+'''
 # === Plot 5: RR-Interval PSD ===
 plt.figure(5, figsize=(10, 6))
 plt.plot(fafrequencies, psd_ms2_per_hz, color='blue', label='PSD')
 plt.xlabel('Frequency (Hz)')
 plt.ylabel('Power Spectral Density ($ms^2/Hz$)')
 plt.title('Heart Rate Variability Power Spectral Density (PSD)')
-plt.grid(True, linestyle='--', alpha=0.7)
-plt.xlim(0, 0.7) # Focus on the physiologically relevant range
+#plt.grid(True, linestyle='--', alpha=0.7)
 
 # Highlight frequency bands
 plt.axvspan(LF_band[0], LF_band[1], color='red', alpha=0.2, label='LF Band')
 plt.axvspan(HF_band[0], HF_band[1], color='green', alpha=0.2, label='HF Band')
-# plt.axvspan(VLF_band[0], VLF_band[1], color='orange', alpha=0.1, label='VLF Band') # Often less relevant for 5-min
+plt.xlim(0, 1.5)  # Show up to 15 Hz (no need to show Nyquist at 200 Hz)
 
-plt.legend()
+'''
 
 # Formatting
-plt.xlim(0, 15)  # Show up to 15 Hz (no need to show Nyquist at 200 Hz)
-plt.grid(True, which='both', linestyle='--', alpha=0.7)
-plt.legend()
-plt.tight_layout()
+
 
 
 # === Show both windows ===
