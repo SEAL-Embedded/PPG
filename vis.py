@@ -13,7 +13,7 @@ base_path = os.path.join(baser_path, "firstTests")
 ir_path = os.path.join(base_path, "belle.csv")
 
 # === Load IR data ===
-with open("data\\firstTests\\21_middle.csv", 'r') as file:
+with open("data\\firstTests\\ppg_data.csv", 'r') as file:
     reader = csv.reader(file)
     
     # Read all rows once and extract timestamps and IR data
@@ -35,10 +35,9 @@ print(len(corrected_timestamps))
 for i in range(1, len(corrected_timestamps)):
         time_diff = corrected_timestamps[i] - corrected_timestamps[i-1]
 
-        if abs(time_diff) > 50000:
+        if abs(time_diff) > 10000:
             print(f"\n--- Detected jump at index {i} ---")
             print(f"  Previous timestamp: {corrected_timestamps[i-1]} us")
-            print(f"  Current (uncorrected) timestamp: {corrected_timestamps[i]} us")
             print(f"  Observed difference: {time_diff} us")
 
             # Calculate the actual "missing" time or excessive delay
@@ -61,14 +60,14 @@ for i in range(1, len(corrected_timestamps)):
 
 
 timestamps_seconds = np.array(corrected_timestamps) / 1e6  # µs → seconds
-start_time = timestamps_seconds[0]
-timestamps = timestamps_seconds - start_time  # Now starts at 0
-start_time = timestamps[0]
+first_time = timestamps_seconds[0]
+timestamps = timestamps_seconds - first_time  # Now starts at 0
+first_time = timestamps[0]
 print("useless")
-print("start time:", start_time)
+print("start time:", first_time)
 end_time = timestamps[-1]
-num_samples = int(np.ceil((end_time - start_time) * actual_sampling_rate))
-uniform_timestamps = np.linspace(start_time, end_time, num_samples)
+num_samples = int(np.ceil((end_time - first_time) * actual_sampling_rate))
+uniform_timestamps = np.linspace(first_time, end_time, num_samples)
 interpolator = interp1d(timestamps, ir_data, kind='cubic', fill_value='extrapolate')
 resampled_signal = interpolator(uniform_timestamps)
 
@@ -78,27 +77,29 @@ print(len(uniform_timestamps))
 
 
 # === CONTROL: Time range to plot (in seconds) ===
-start_time = 20   # set this to your desired start
-end_time = 320     # set this to your desired end
+start_time = 0   # set this to your desired start
+end_time = 300     # set this to your desired end
 
 # === Filter data based on time range ===
-filtered_indices = [i for i, t in enumerate(x_values) if start_time <= t <= end_time]
-x_filtered = [x_values[i] for i in filtered_indices]
+filtered_indices = [i for i, t in enumerate(uniform_timestamps) if start_time <= t <= end_time]
+
+x_filtered = [uniform_timestamps[i] for i in filtered_indices]
+
 ir_filtered = [resampled_signal[i] for i in filtered_indices]
 
 # === Raw Points ===
-x_raw_filtered = [x_values[i] for i in range(len(x_values)) if start_time <= x_values[i] <= end_time]
-ir_raw_filtered = [resampled_signal[i] for i in range(len(x_values)) if start_time <= x_values[i] <= end_time]
+
 
 # === Remove Outliers ===
-y = np.array(ir_raw_filtered)
+y = np.array(ir_filtered)
 y_median = pd.Series(y).rolling(window=15, center=True, min_periods=1).median()
-gap = y_median - y
-threshold = 6 * np.std(gap.dropna())
+gap = abs(y_median - y)
+threshold = 4.25 * np.std(gap.dropna())
 outliers = gap > threshold
 x_filtered = np.array(x_filtered)
 bad_x = x_filtered[outliers]
 bad_y = y[outliers]
+
 
 y_fixed = np.copy(y)
 
@@ -113,7 +114,7 @@ window_size = 0
 smooth = lambda data: [np.mean(data[max(0, i-window_size): min(len(data), i+window_size + 1)]) for i in range(len(data))]
 
 ir_smooth = smooth(y_fixed)
-x_smoothed = x_values[:len(ir_smooth)]
+x_smoothed = uniform_timestamps[:len(ir_smooth)]
 
 # === High Pass Detrend ===
 from scipy.signal import butter, filtfilt
@@ -127,7 +128,7 @@ def bandpass(data, lowcut=0.5, highcut=10, fs=50, order=2):
 hpfiltered = bandpass(ir_smooth, lowcut=0.6, highcut=3.3, fs=actual_sampling_rate)
 
 # === Peak Finding ===
-peaks, props = find_peaks(hpfiltered, prominence=8, width = 0.2, distance = 0.55*actual_sampling_rate)
+peaks, props = find_peaks(hpfiltered, prominence=1.7, width = 0.18, distance = 0.5*actual_sampling_rate)
 
 '''
 # === FFT ===
@@ -151,7 +152,7 @@ median_rr = np.median(rr_intervals)
 filtered_peaks = [peaks[0]]
 for i in range(1, len(peak_times)):
     rr = peak_times[i] - peak_times[i - 1]
-    if 0.5 * median_rr < rr < 1.7 * median_rr:
+    if 0.5 * median_rr < rr:
         filtered_peaks.append(peaks[i])
 
 # Recalculate using filtered peaks
@@ -286,17 +287,18 @@ print(f"LF/HF Ratio: {lf_hf_ratio:.2f}")
 
 '''
 # === SNR ===
-fs = 400
-frequencies, psd = welch(ir_raw_filtered, 
+fs = actual_sampling_rate  # Sampling frequency
+frequencies, psd = welch(y_fixed, 
                         fs=fs, 
                         nperseg=8192,  # Window size
                         noverlap=4096,  # Overlap between segments
+                        nfft=65536,
                         scaling='density')
 
 
 
 # Calculate SNR (Heart band vs Noise band)
-plusminusrange = 0.1
+plusminusrange = 0.2
 print("BPS")
 print(bps)
 heart_rate_range = (bps-plusminusrange, bps+plusminusrange)   # Very low frequency noise
@@ -326,6 +328,10 @@ noise_area = simpson(psd[mask_all], frequencies[mask_all]) - heart_area
 snr = heart_area / noise_area
 print(snr)
 
+print("httr")
+httr = heart_area / all_area
+print(httr)
+
 
 # === calculating APA ===
 peak_values = hpfiltered[filtered_peaks]
@@ -339,8 +345,10 @@ print(average_peak_value)
 # === Plot 1: Smoothed and Raw in Window 1 ===
 
 plt.figure(1, figsize=(12, 6))
-plt.plot(x_values, ir_data, label='IR Smoothed')
-plt.plot(x_raw_filtered, ir_raw_filtered, 'o', label='IR Raw', markersize=3)
+plt.plot(x_filtered, ir_filtered, label='IR Smoothed')
+plt.plot(x_filtered, ir_filtered, 'o', label='IR Raw', markersize=3)
+plt.plot(bad_x, bad_y, 'o', label='IR Raw', markersize=4, color = 'black')
+
 plt.title(f"PPG Signal — Smoothed & Raw — {start_time}s to {end_time}s")
 plt.xlabel("Time (seconds)")
 plt.ylabel("Sensor Value")

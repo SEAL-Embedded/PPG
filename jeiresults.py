@@ -7,7 +7,7 @@ import pandas as pd
 from scipy.integrate import simpson
 from scipy.interpolate import interp1d
 
-
+import scipy.stats as stats
 # === File paths ===
 data_folder = os.path.join("data", "firstTests")
 
@@ -67,7 +67,7 @@ def process_ppg_file(file_path):
     unique_timestamps, unique_indices = np.unique(timestamps, return_index=True)
 
 
-    interpolator = interp1d(unique_timestamps, np.array(ir_data)[unique_indices], kind='cubic', fill_value='extrapolate')
+    interpolator = interp1d(timestamps, np.array(ir_data)[unique_indices], kind='cubic', fill_value='extrapolate')
     resampled_signal = interpolator(uniform_timestamps)
 
     # --- Filter data based on time range ---
@@ -76,6 +76,20 @@ def process_ppg_file(file_path):
 
     print(end_time_segment)
     # === Filter data based on time range ===
+
+    custom_time_ranges = {}
+
+    with open("time_segments.csv", mode='r') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            filename = row['filename']
+            start = float(row['start'])  # or int() if all times are integers
+            end = float(row['end'])
+            custom_time_ranges[filename] = (start, end)
+    
+    filename = os.path.splitext(os.path.basename(file_path))[0]
+    start_time_segment, end_time_segment = custom_time_ranges.get(filename, custom_time_ranges['default'])
+
     # Important: Convert uniform_timestamps to a NumPy array for boolean indexing
     uniform_timestamps_np = np.array(uniform_timestamps)
 
@@ -83,8 +97,6 @@ def process_ppg_file(file_path):
     time_mask = (uniform_timestamps_np >= start_time_segment) & \
                 (uniform_timestamps_np <= end_time_segment)
 
-    x_filtered_calc = uniform_timestamps_np[time_mask]
-    ir_filtered_calc = resampled_signal[time_mask] # Also apply mask to resampled_signal
 
     x_filtered_calc = [x_values[i] for i in range(len(x_values)) if start_time_segment <= x_values[i] <= end_time_segment]
     ir_filtered_calc = [resampled_signal[i] for i in range(len(x_values)) if start_time_segment <= x_values[i] <= end_time_segment]
@@ -93,8 +105,8 @@ def process_ppg_file(file_path):
     # --- Remove Outliers ---
     y = np.array(ir_filtered_calc)
     y_median = pd.Series(y).rolling(window=15, center=True, min_periods=1).median()
-    gap = y_median - y
-    threshold = 6 * np.std(gap.dropna())
+    gap = abs(y_median - y)
+    threshold = 4.25 * np.std(gap.dropna())
     outliers = gap > threshold
     x_filtered = np.array(x_filtered_calc)
     bad_x = x_filtered[outliers]
@@ -132,8 +144,14 @@ def process_ppg_file(file_path):
     hpfiltered = bandpass(ir_smooth, lowcut=0.6, highcut=3.3, fs=actual_sampling_rate)
 
     # --- Peak Finding ---
+    if ("44" in file_path):
+        peakprom = 1.9
+    else:
+        peakprom = 5
+
+    
     try:
-        peaks, props = find_peaks(hpfiltered, prominence=8, width=0.2, distance=0.55 * actual_sampling_rate)
+        peaks, props = find_peaks(hpfiltered, prominence=peakprom, width=0.2, distance=0.5 * actual_sampling_rate)
     except ValueError as e:
         print(f"Error during peak finding in {file_path}: {e}")
         return os.path.basename(file_path), None, None
@@ -148,14 +166,14 @@ def process_ppg_file(file_path):
     filtered_peaks = [peaks[0]]
     for i in range(1, len(peak_times)):
         rr = peak_times[i] - peak_times[i - 1]
-        if 0.5 * median_rr < rr < 1.7 * median_rr:
+        if 0.5 * median_rr < rr:
             filtered_peaks.append(peaks[i])
 
 
     # Recalculate filtered_peak_times based on the filtered_peaks indices
     filtered_peak_times = np.array(filtered_peaks) * time_interval + start_time_segment
     filtered_rr_intervals = np.diff(filtered_peak_times)
-
+  
     if os.path.basename(file_path) == "21_middle.csv":
         print(filtered_peak_times)
 
@@ -177,13 +195,14 @@ def process_ppg_file(file_path):
         print(f"Insufficient data to perform Welch's method in {file_path}.")
         return os.path.basename(file_path), None, None
 
-    frequencies, psd = welch(ir_filtered_calc,
+    frequencies, psd = welch(y_fixed,
                              fs=fs_snr,
                              nperseg=8192,
                              noverlap=4096,
+                             nfft=65536,
                              scaling='density')
 
-    plusminusrange = 0.1
+    plusminusrange = 0.2
     print(bps)
     heart_rate_range = (bps - plusminusrange, bps + plusminusrange)
     first_harmonic = (bps * 2 - plusminusrange, bps * 2 + plusminusrange)
@@ -209,13 +228,12 @@ def process_ppg_file(file_path):
     if np.any(mask_all):
         all_area = simpson(psd[mask_all], frequencies[mask_all])
 
-    noise_area = all_area - heart_area
+    noise_area = all_area
 
     if noise_area <= 0:
         snr = float('inf') if heart_area > 0 else 0
     else:
-        snr = heart_area / noise_area
-
+        snr = heart_area/noise_area
     # --- Calculating APA (Average Peak Height) ---
     # Ensure filtered_peaks contains valid indices within hpfiltered
     valid_filtered_peaks = [p for p in filtered_peaks if p < len(hpfiltered)]
@@ -224,7 +242,7 @@ def process_ppg_file(file_path):
 
     # --- Store plotting data if this is the target file ---
     plotting_data = None
-    if os.path.basename(file_path) == "21_middle.csv":
+    if os.path.basename(file_path) == "22_3middle.csv":
         # Calculate dominant frequency for plotting title
         # This requires finding the max PSD in the heart rate band
         mask_heart_combined = ((frequencies >= heart_rate_range[0]) & (frequencies <= heart_rate_range[1])) | \
@@ -266,6 +284,14 @@ def process_ppg_file(file_path):
 if __name__ == "__main__":
 
     results = []
+
+    thumbhttrs = []
+    pointerhttrs = []
+    middlehttrs = []
+    ringhttrs = []
+    pinkyhttrs = []
+
+
     plot_for_21_middle = None # Variable to store plotting data for '21_middle.csv'
 
     # Get all CSV files in the specified data_folder
@@ -273,8 +299,10 @@ if __name__ == "__main__":
         if filename.endswith(".csv"):
             file_path = os.path.join(data_folder, filename)
             file_name, snr_value, aph_value, plotting_data = process_ppg_file(file_path)
+            if file_name == "22_3middle.csv" and plotting_data is not None:
+                plot_for_21_middle = plotting_data
             results.append({"File": file_name, "SNR": snr_value, "APH": aph_value})
-            if file_name == "21_middle.csv" and plotting_data is not None:
+            if file_name == "22_3middle.csv" and plotting_data is not None:
                 plot_for_21_middle = plotting_data
 
 
@@ -286,6 +314,18 @@ if __name__ == "__main__":
         snr_str = f"{result['SNR']:.4f}" if result['SNR'] is not None else "N/A"
         aph_str = f"{result['APH']:.4f}" if result['APH'] is not None else "N/A"
         print(f"File: {result['File']:<25} | SNR: {snr_str:<8} | APH: {aph_str:<8}")
+
+        if ("1thumb" in result['File']):
+            thumbhttrs.append(result['SNR'])
+        elif ("2pointer" in result['File']):
+            pointerhttrs.append(result['SNR'])
+        elif ("3middle" in result['File']): 
+            middlehttrs.append(result['SNR'])
+        elif ("4ring" in result['File']):   
+            ringhttrs.append(result['SNR']) 
+        elif ("5pinky" in result['File']):
+            pinkyhttrs.append(result['SNR'])
+
     print("="*50)
 
     if results: # Only save if there are results
@@ -326,6 +366,10 @@ if __name__ == "__main__":
         print(f"\nGrouped results saved to file")
     else:
         print("\nNo results to save to CSV.")
+
+
+    print("anova")
+    print(stats.f_oneway(thumbhttrs, pointerhttrs, middlehttrs, ringhttrs, pinkyhttrs))
 
     if plot_for_21_middle is not None:
         print("\n--- Generating PSD Plot for 21_middle.csv ---")
