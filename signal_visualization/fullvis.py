@@ -20,7 +20,7 @@ import os
 import sys
 
 import matplotlib.pyplot as plt
-SCRIPT_DIR = "session_20260516_174059"
+SCRIPT_DIR = "session_20260516_190103ut"
 ECG_FILENAME = "ecg_data.csv"
 
 
