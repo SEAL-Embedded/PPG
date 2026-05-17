@@ -27,8 +27,11 @@ from datetime import datetime
 
 import serial
 
-PORT = "COM3"
-BAUD = 115200
+# PORT / BAUD / SESSION_DIR can be overridden by the webapp launcher via env
+# vars so the same script keeps working when run standalone (the defaults
+# below match the original hardcoded values).
+PORT = os.environ.get("SEAL_PPG_PORT", "COM3")
+BAUD = int(os.environ.get("SEAL_PPG_BAUD", "115200"))
 
 MAX_PPG_CHANNELS = 8
 ECG_CHANNEL = 0xE0
@@ -42,6 +45,12 @@ VALID_CHANNELS = set(range(MAX_PPG_CHANNELS)) | {ECG_CHANNEL}
 
 
 def make_session_dir():
+    # Honour SEAL_PPG_SESSION_DIR so the webapp can pre-create the folder and
+    # know the exact target path without parsing this script's stdout.
+    override = os.environ.get("SEAL_PPG_SESSION_DIR")
+    if override:
+        os.makedirs(override, exist_ok=True)
+        return override
     base = os.path.dirname(os.path.abspath(__file__))
     name = "session_" + datetime.now().strftime("%Y%m%d_%H%M%S")
     path = os.path.join(base, name)

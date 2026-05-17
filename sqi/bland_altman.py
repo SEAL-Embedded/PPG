@@ -2,11 +2,6 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# -----------------------------
-# Load CSV
-# -----------------------------
-ppg = pd.read_csv("sample_ppg.csv")
-ecg = pd.read_csv("sample_ecg.csv")
 
 # -----------------------------
 # Compute Bland-Altman
@@ -66,12 +61,16 @@ def plot_bland_altman(results):
 
 
 # -----------------------------
-# Run
+# Run (standalone CLI behaviour preserved when invoked directly)
 # -----------------------------
-results = compute_bland_altman(ppg, ecg)
+if __name__ == "__main__":
+    ppg = pd.read_csv("sample_ppg.csv")
+    ecg = pd.read_csv("sample_ecg.csv")
 
-print(results)
+    results = compute_bland_altman(ppg, ecg)
 
-results.to_csv("bland_altman_results.csv", index=False)
+    print(results)
 
-plot_bland_altman(results)
+    results.to_csv("bland_altman_results.csv", index=False)
+
+    plot_bland_altman(results)

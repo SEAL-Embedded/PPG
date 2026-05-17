@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Captured session data — user recordings, never check in
+session_*/
+
+# Nested historical clone (separate .git)
+sqi/PPG/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
