@@ -27,7 +27,7 @@ from datetime import datetime
 
 import serial
 
-PORT = "COM3"
+PORT = "COM4"
 BAUD = 115200
 
 MAX_PPG_CHANNELS = 8
