@@ -21,3 +21,7 @@ and `sqi/ccc.py` (CCC + Bland-Altman vs ECG). Participant metadata
 The original CLI scripts continue to work standalone — `python
 PPG_ECG_Full_Unpacking.py`, `python vis.py`, `python fullvis.py`,
 `python sqi/ccc.py`.
+
+See [`webapp/README.md`](webapp/README.md) for a full dashboard user
+guide: recording workflow, what each plot and table column means,
+sidebar collapse, file layout, and troubleshooting.
