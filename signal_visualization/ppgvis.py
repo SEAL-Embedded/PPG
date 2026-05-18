@@ -26,7 +26,7 @@ import pyhrv.frequency_domain as fd
 
 # Path to the raw PPG CSV file (column 0 = timestamp µs, column 1 = IR value)
 #file_path = os.path.join("PPG", "day1test2530.csv")
-file_path = "unscheduled2.csv"
+file_path = "session_20260516_174059\\ppg_data_ch2.csv"
 
 # Nominal sampling interval and rate (used for timestamp correction and resampling)
 time_interval = 1/750       # seconds per sample (750 Hz)
@@ -124,7 +124,7 @@ end_time = 900    # seconds
 
 # Load per-file time ranges from metadata
 custom_time_ranges = {}
-with open("Metadata\\PPG_time_ranges.csv", mode='r') as csvfile:
+with open("old\\Metadata\\PPG_time_ranges.csv", mode='r') as csvfile:
     reader = csv.DictReader(csvfile)
     for row in reader:
         time_ranges_filename = row['filename']
@@ -261,7 +261,7 @@ for i in range(1, len(peak_times)):
 # that fall within those segments.
 # =============================================================================
 
-df = pd.read_csv("Metadata\\RemoveRanges.csv")
+df = pd.read_csv("old\\Metadata\\RemoveRanges.csv")
 # Get only the removal ranges relevant to this file
 ranges = df[df['filename'] == time_ranges_filename][['start_idx', 'end_idx']].values
 
@@ -290,7 +290,7 @@ ranges_removed_peaks = ((ranges_removed_peak_times - start_time) / time_interval
 final_peaks = []
 custom_peaks = []
 
-df = pd.read_csv("Metadata\\Manual_peaks.csv")
+df = pd.read_csv("old\\Metadata\\Manual_peaks.csv")
 file_ranges = df[df['filename'].str.strip() == time_ranges_filename]
 
 for _, row in file_ranges.iterrows():
