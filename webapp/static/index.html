@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SEAL · PPG — Acquisition &amp; Analysis</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+</head>
+<body>
+
+<header>
+  <span class="brand">SEAL <span class="accent">PPG</span></span>
+  <span class="subtitle">Acquisition &amp; Analysis</span>
+  <span class="spacer"></span>
+  <span class="session-chip" id="session-chip"></span>
+  <span class="status" id="status"><span class="dot"></span><span id="status-label">idle</span></span>
+</header>
+
+<main id="main">
+
+  <!-- ─────────  Column 1 · Record  ───────── -->
+  <aside class="col" id="col1">
+    <button class="col-toggle" data-col="1" title="Collapse / expand Record panel">«</button>
+    <p class="eyebrow">Record</p>
+
+    <div class="form-row split">
+      <div class="form-group" style="margin:0;">
+        <label class="lbl">Port</label>
+        <select id="port-select"></select>
+      </div>
+      <div class="form-group" style="margin:0; align-self: end;">
+        <button id="port-refresh" class="icon ghost" title="Rescan serial ports">⟳</button>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="lbl">Baud</label>
+      <input id="baud-input" type="number" value="115200" min="9600" step="1">
+    </div>
+
+    <div class="form-row two">
+      <div class="form-group" style="margin:0;">
+        <label class="lbl">Participant ID</label>
+        <input id="pid-input" placeholder="P001">
+      </div>
+      <div class="form-group" style="margin:0;">
+        <label class="lbl">Fitzpatrick</label>
+        <select id="fst-select">
+          <option value="">—</option>
+          <option value="1">I</option>
+          <option value="2">II</option>
+          <option value="3">III</option>
+          <option value="4">IV</option>
+          <option value="5">V</option>
+          <option value="6">VI</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="lbl">Notes</label>
+      <textarea id="notes-input" rows="2" placeholder="e.g. ambient light, posture"></textarea>
+    </div>
+
+    <div class="form-group">
+      <label class="lbl">Channel → Site</label>
+      <div class="sites" id="sites-grid"></div>
+    </div>
+
+    <div class="btn-row">
+      <button id="btn-start" class="primary">● Start</button>
+      <button id="btn-stop" class="danger" disabled>■ Stop</button>
+    </div>
+
+    <div class="counters" id="counters"></div>
+    <pre class="log" id="record-log"></pre>
+  </aside>
+
+  <!-- ─────────  Column 2 · Sessions  ───────── -->
+  <aside class="col" id="col2">
+    <button class="col-toggle" data-col="2" title="Collapse / expand Sessions panel">«</button>
+    <p class="eyebrow">Sessions <span class="hint" id="session-count"></span></p>
+    <div class="form-group session-search">
+      <input id="session-filter" placeholder="Filter by ID or date…">
+    </div>
+    <ul class="session-list" id="session-list"></ul>
+  </aside>
+
+  <!-- ─────────  Column 3 · Detail  ───────── -->
+  <section class="col col-main" id="col-main">
+
+    <div id="no-session" class="no-session">
+      <h2>No session selected</h2>
+      <p>Pick a session from the list to view its signals and SQI metrics, or start a new recording from the left.</p>
+    </div>
+
+    <div id="detail" class="hidden">
+
+      <div class="detail-header">
+        <p class="eyebrow">Session</p>
+        <h1 class="detail-title" id="detail-title"></h1>
+
+        <div class="meta-grid" id="meta-grid"></div>
+
+        <div class="action-row">
+          <button id="btn-analyze">Run analysis</button>
+          <button id="btn-reload-signals" class="ghost">Reload signals</button>
+          <button id="btn-save-meta" class="ghost">Save metadata</button>
+          <div class="spacer"></div>
+          <span class="muted mono" id="analysis-status"></span>
+        </div>
+      </div>
+
+      <!-- ECG hero -->
+      <section class="block" id="ecg-block">
+        <div class="header-row">
+          <p class="eyebrow">ECG reference</p>
+          <span class="right" id="ecg-summary"></span>
+        </div>
+        <div id="ecg-plot" class="plot hero"></div>
+      </section>
+
+      <!-- PPG channels -->
+      <section class="block" id="ppg-block">
+        <div class="header-row">
+          <p class="eyebrow">PPG channels</p>
+          <span class="right" id="ppg-summary"></span>
+        </div>
+        <div class="ppg-grid" id="ppg-grid"></div>
+      </section>
+
+      <!-- SQI table -->
+      <section class="block" id="sqi-block">
+        <div class="header-row">
+          <p class="eyebrow">SQI &amp; agreement vs ECG</p>
+          <span class="right" id="sqi-summary"></span>
+        </div>
+        <div class="sqi-wrap"><table class="sqi-table" id="sqi-table"></table></div>
+      </section>
+
+      <!-- Bland-Altman -->
+      <section class="block hidden" id="ba-block">
+        <div class="header-row">
+          <p class="eyebrow">Bland-Altman per channel</p>
+        </div>
+        <div class="ba-grid" id="ba-grid"></div>
+      </section>
+
+    </div>
+
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
