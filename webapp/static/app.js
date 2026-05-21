@@ -50,6 +50,8 @@ const state = {
   sessions: [],
   pollTimer: null,
   channelSites: loadSiteMap(),
+  bpChannels: new Set(),     // PPG channels currently showing the 0.6-3.3 Hz bandpass
+  window: { start: null, end: null },  // pre-processing crop, seconds since session t0
 };
 
 // ── DOM helpers ──────────────────────────────────────────────────────────────
@@ -70,6 +72,23 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btn-analyze").onclick  = () => runAnalysis(true);
   $("btn-reload-signals").onclick = () => loadSignals(state.selectedSession);
   $("btn-save-meta").onclick = saveMetadata;
+  $("btn-bp-all").onclick = toggleAllBandpass;
+  $("btn-win-apply").onclick = applyWindow;
+  $("btn-win-full").onclick  = clearWindow;
+  ["win-start", "win-end"].forEach(id => {
+    $(id).addEventListener("keydown", e => { if (e.key === "Enter") applyWindow(); });
+  });
+  $("btn-delete").onclick = openDeleteModal;
+  $("delete-cancel").onclick = closeDeleteModal;
+  $("delete-confirm").onclick = performDelete;
+  // Delete stays disabled until the user explicitly picks the delete
+  // option from the dropdown — the deliberate confirmation gesture.
+  $("delete-confirm-select").onchange = (e) => {
+    setEnabled("delete-confirm", e.target.value === "delete");
+  };
+  $("delete-modal").addEventListener("click", (e) => {
+    if (e.target.id === "delete-modal") closeDeleteModal();  // click backdrop to cancel
+  });
   $("session-filter").oninput = renderSessionList;
   document.querySelectorAll(".col-toggle").forEach(btn => {
     btn.addEventListener("click", () => toggleSidebar(parseInt(btn.dataset.col, 10)));
@@ -287,6 +306,7 @@ async function selectSession(name, opts = {}) {
   setEnabled("btn-analyze", true);
   setEnabled("btn-reload-signals", true);
   setEnabled("btn-save-meta", true);
+  syncWindowInputs();   // window persists across sessions; show it
 
   try {
     const s = await fetch(`/api/sessions/${name}`).then(r => r.json());
@@ -317,12 +337,25 @@ async function pollLiveSignals(name) {
   } catch { /* receiver may not have flushed first row yet */ }
 }
 
+// Build the &start_s=..&end_s=.. suffix for the active crop window.
+// Only emits a bound that's actually set, so "from 10s on" works.
+function windowQS() {
+  const { start, end } = state.window;
+  let qs = "";
+  if (start != null) qs += `&start_s=${start}`;
+  if (end != null)   qs += `&end_s=${end}`;
+  return qs;
+}
+
 async function loadSessionFull(name) {
   // Kick signals + analysis in parallel; render whichever returns first.
+  // Both carry the same crop window so the plots and the SQI/CCC table
+  // describe exactly the same span of data.
   $("analysis-status").textContent = "loading…";
   setStatus("analyzing", "analyzing");
-  const sigP = fetch(`/api/sessions/${name}/signals?max_points=4500`).then(r => r.json());
-  const anaP = fetch(`/api/sessions/${name}/analyze`, {method:"POST"}).then(r => r.json());
+  const w = windowQS();
+  const sigP = fetch(`/api/sessions/${name}/signals?max_points=4500${w}`).then(r => r.json());
+  const anaP = fetch(`/api/sessions/${name}/analyze?${w.slice(1)}`, {method:"POST"}).then(r => r.json());
 
   const [sig, ana] = await Promise.all([
     sigP.catch(e => ({error: e.message})),
@@ -336,6 +369,20 @@ async function loadSessionFull(name) {
   renderEverything();
 }
 
+// Reload only the signal traces (ECG + PPG) for the current crop window,
+// without re-running the SQI/CCC analysis. Backs the "Reload signals"
+// button (previously wired to an undefined function).
+async function loadSignals(name) {
+  if (!name) return;
+  try {
+    state.signals = await fetch(
+      `/api/sessions/${name}/signals?max_points=4500${windowQS()}`
+    ).then(r => r.json());
+    renderECGBlock();
+    renderPPGBlock();
+  } catch (e) { flash("Reload failed: " + e.message); }
+}
+
 async function runAnalysis(showBusy) {
   const name = state.selectedSession;
   if (!name) return;
@@ -344,13 +391,47 @@ async function runAnalysis(showBusy) {
     setStatus("analyzing", "analyzing");
   }
   try {
-    state.analysis = await postJSON(`/api/sessions/${name}/analyze`, {});
+    state.analysis = await fetch(
+      `/api/sessions/${name}/analyze?${windowQS().slice(1)}`, { method: "POST" }
+    ).then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); });
     renderEverything();
   } catch (e) { flash("Analysis failed: " + e.message); }
   finally {
     setStatus("idle", "idle");
     $("analysis-status").textContent = "";
   }
+}
+
+function applyWindow() {
+  const s = parseFloat($("win-start").value);
+  const e = parseFloat($("win-end").value);
+  const start = isFinite(s) ? s : null;
+  const end   = isFinite(e) ? e : null;
+  if (start != null && end != null && start >= end) {
+    flash("Window start must be less than end.");
+    return;
+  }
+  state.window = { start, end };
+  syncWindowInputs();
+  if (state.selectedSession) loadSessionFull(state.selectedSession);
+}
+
+function clearWindow() {
+  state.window = { start: null, end: null };
+  $("win-start").value = "";
+  $("win-end").value = "";
+  syncWindowInputs();
+  if (state.selectedSession) loadSessionFull(state.selectedSession);
+}
+
+// Reflect the active window into the inputs and flag the control as
+// active so it's visually obvious the data is cropped.
+function syncWindowInputs() {
+  const { start, end } = state.window;
+  $("win-start").value = start != null ? start : "";
+  $("win-end").value   = end != null ? end : "";
+  document.querySelector(".range-ctl")
+    .classList.toggle("active", start != null || end != null);
 }
 
 function renderEverything() {
@@ -417,7 +498,7 @@ function renderECGBlock() {
 
   const traces = [{
     x: ecg.time_s, y: ecg.signal,
-    type: "scattergl", mode: "lines",
+    type: "scatter", mode: "lines",
     line: { width: 1, color: C.ecg },
     name: "ECG",
     hovertemplate: "%{x:.2f}s · %{y:.0f}<extra></extra>",
@@ -427,7 +508,7 @@ function renderECGBlock() {
     const ys = interpY(ecg.time_s, ecg.signal, ana.peak_times_s);
     traces.push({
       x: ana.peak_times_s, y: ys,
-      type: "scattergl", mode: "markers",
+      type: "scatter", mode: "markers",
       marker: { size: 6, color: C.ecg, line: { color: "#1a0606", width: 1 } },
       name: "R-peaks",
       hovertemplate: "R-peak @ %{x:.2f}s<extra></extra>",
@@ -459,9 +540,13 @@ function renderPPGBlock() {
   const chans = state.signals?.channels || [];
   const block = $("ppg-block");
   const grid = $("ppg-grid");
+  // Tear down the previous session's Plotly instances before innerHTML
+  // discards their divs, so their listeners/internals don't leak.
+  purgePlots(grid);
   if (!chans.length) {
     block.classList.add("hidden");
     grid.innerHTML = "";
+    $("btn-bp-all").classList.add("hidden");
     return;
   }
   block.classList.remove("hidden");
@@ -470,46 +555,89 @@ function renderPPGBlock() {
   const totalSamp = chans.reduce((a, c) => a + c.n_samples, 0);
   $("ppg-summary").textContent = `${chans.length} channels  ·  ${totalSamp.toLocaleString()} samp total`;
 
-  grid.innerHTML = chans.map(c => `
+  // signal_bp is the 0.6-3.3 Hz cardiac bandpass (computed server-side,
+  // same filter as ppgvis.py); null when the channel's fs/length can't
+  // support it, in which case its checkbox is disabled.
+  const anyBpAble = chans.some(c => c.signal_bp);
+  $("btn-bp-all").classList.toggle("hidden", !anyBpAble);
+
+  grid.innerHTML = chans.map(c => {
+    const able = !!c.signal_bp;
+    const on = able && state.bpChannels.has(c.channel);
+    return `
     <div class="ppg-card">
       <div class="pcap">
         <span class="name">CH${c.channel}</span>
         <span class="site">${sites[c.channel] || "—"}</span>
         <span class="meta">${c.n_samples.toLocaleString()} @ ${fmtFs(c.fs_hz)}</span>
+        <label class="bp-toggle${able ? "" : " disabled"}">
+          <input type="checkbox" class="bp-cb" data-ch="${c.channel}"
+                 ${on ? "checked" : ""} ${able ? "" : "disabled"}> bandpass
+        </label>
       </div>
       <div class="ppg-plot" id="ppg-plot-${c.channel}"></div>
-    </div>
-  `).join("");
+    </div>`;
+  }).join("");
 
-  const ana = state.analysis?.results || [];
-  const byCh = new Map(ana.map(r => [r.channel, r]));
-
-  chans.forEach(c => {
-    const color = chColor(c.channel);
-    const traces = [{
-      x: c.time_s, y: c.signal,
-      type: "scattergl", mode: "lines",
-      line: { width: 1, color },
-      hovertemplate: "%{x:.2f}s · %{y:.0f}<extra></extra>",
-    }];
-    const r = byCh.get(c.channel);
-    if (r?.ppg_peak_times_s?.length) {
-      const ys = interpY(c.time_s, c.signal, r.ppg_peak_times_s);
-      traces.push({
-        x: r.ppg_peak_times_s, y: ys,
-        type: "scattergl", mode: "markers",
-        marker: { size: 4, color, line: { color: C.panel, width: 1 } },
-        hovertemplate: "PPG peak @ %{x:.2f}s<extra></extra>",
-      });
-    }
-    Plotly.react("ppg-plot-" + c.channel, traces, {
-      ...PLOT_BASE,
-      height: 360,
-      showlegend: false,
-      xaxis: axisStyle({ title: "time (s)", showticks: true }),
-      yaxis: axisStyle({ title: "PPG (ADC)", showticks: true }),
-    }, PLOT_CFG);
+  grid.querySelectorAll(".bp-cb").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const ch = parseInt(cb.dataset.ch, 10);
+      if (cb.checked) state.bpChannels.add(ch);
+      else state.bpChannels.delete(ch);
+      drawPPGChannel(chans.find(c => c.channel === ch));
+    });
   });
+
+  chans.forEach(drawPPGChannel);
+}
+
+function drawPPGChannel(c) {
+  if (!c) return;
+  const color = chColor(c.channel);
+  const useBp = !!c.signal_bp && state.bpChannels.has(c.channel);
+  const xx = useBp ? c.time_bp_s : c.time_s;
+  const yy = useBp ? c.signal_bp : c.signal;
+
+  const traces = [{
+    x: xx, y: yy,
+    type: "scatter", mode: "lines",
+    line: { width: 1, color },
+    hovertemplate: "%{x:.2f}s · %{y:.0f}<extra></extra>",
+  }];
+  // Peak markers were detected on the raw signal; anchoring them to the
+  // displayed series (raw or bandpassed) by timestamp keeps them aligned.
+  const r = (state.analysis?.results || []).find(x => x.channel === c.channel);
+  if (r?.ppg_peak_times_s?.length) {
+    const ys = interpY(xx, yy, r.ppg_peak_times_s);
+    traces.push({
+      x: r.ppg_peak_times_s, y: ys,
+      type: "scatter", mode: "markers",
+      marker: { size: 4, color, line: { color: C.panel, width: 1 } },
+      hovertemplate: "PPG peak @ %{x:.2f}s<extra></extra>",
+    });
+  }
+  Plotly.react("ppg-plot-" + c.channel, traces, {
+    ...PLOT_BASE,
+    height: 360,
+    showlegend: false,
+    xaxis: axisStyle({ title: "time (s)", showticks: true }),
+    yaxis: axisStyle({ title: useBp ? "PPG bandpassed (0.6-3.3 Hz)" : "PPG (ADC)", showticks: true }),
+  }, PLOT_CFG);
+}
+
+function toggleAllBandpass() {
+  const chans = (state.signals?.channels || []).filter(c => c.signal_bp);
+  if (!chans.length) return;
+  // If any filterable channel is still raw, turn all on; otherwise all off.
+  const turnOn = chans.some(c => !state.bpChannels.has(c.channel));
+  chans.forEach(c => {
+    if (turnOn) state.bpChannels.add(c.channel);
+    else state.bpChannels.delete(c.channel);
+  });
+  document.querySelectorAll(".bp-cb").forEach(cb => {
+    cb.checked = state.bpChannels.has(parseInt(cb.dataset.ch, 10));
+  });
+  chans.forEach(drawPPGChannel);
 }
 
 
@@ -587,6 +715,7 @@ function renderBlandAltmanGrid() {
   const r = state.analysis;
   const block = $("ba-block");
   const grid = $("ba-grid");
+  purgePlots(grid);
   const withStats = (r?.results || []).filter(x => x.stats);
   if (!withStats.length) {
     block.classList.add("hidden");
@@ -719,6 +848,60 @@ async function saveMetadata() {
   flash("Metadata saved.", 1200);
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DELETE SESSION
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function openDeleteModal() {
+  const name = state.selectedSession;
+  if (!name) return;
+  const pid = state.sessionDetail?.participant?.participant_id;
+  $("delete-modal-text").innerHTML =
+    `You are about to delete <b>${name}</b>${pid ? ` (participant <b>${pid}</b>)` : ""}.`;
+  // Reset the confirm gesture each time the modal opens.
+  $("delete-confirm-select").value = "";
+  setEnabled("delete-confirm", false);
+  $("delete-modal").classList.remove("hidden");
+}
+
+function closeDeleteModal() {
+  $("delete-modal").classList.add("hidden");
+}
+
+async function performDelete() {
+  const name = state.selectedSession;
+  if (!name) { closeDeleteModal(); return; }
+  if ($("delete-confirm-select").value !== "delete") return;  // belt-and-suspenders
+
+  setEnabled("delete-confirm", false);
+  try {
+    const r = await fetch(`/api/sessions/${name}`, { method: "DELETE" });
+    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+  } catch (e) {
+    flash("Delete failed: " + e.message);
+    return;
+  } finally {
+    closeDeleteModal();
+  }
+
+  // Drop the now-gone session and move on: select the next one, or fall
+  // back to the empty state if that was the last session.
+  state.selectedSession = null;
+  state.sessionDetail = null;
+  state.analysis = null;
+  state.signals = null;
+  await refreshSessions();
+  if (state.sessions.length) {
+    selectSession(state.sessions[0].name);
+  } else {
+    $("detail").classList.add("hidden");
+    $("no-session").classList.remove("hidden");
+    setChip("");
+  }
+  flash(`Deleted ${name}.`, 1500);
+}
+
 function loadSiteMap() {
   try { return JSON.parse(localStorage.getItem("seal_ppg_sites") || "{}"); }
   catch { return {}; }
@@ -760,6 +943,16 @@ function setStatus(cls, label) {
 }
 function setChip(text)   { $("session-chip").textContent = text || ""; }
 function setEnabled(id, on) { const e = $(id); if (e) e.disabled = !on; }
+
+// Tear down every Plotly chart inside a container before its innerHTML
+// is replaced, so per-plot listeners/internals are released cleanly on
+// each session switch instead of being orphaned.
+function purgePlots(container) {
+  if (!container) return;
+  container.querySelectorAll(".js-plotly-plot").forEach(el => {
+    try { Plotly.purge(el); } catch {}
+  });
+}
 
 async function postJSON(url, body) {
   const r = await fetch(url, {

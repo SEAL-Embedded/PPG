@@ -23,6 +23,7 @@ the serial stream as ASCII between newlines and are routed to stdout as
 import os
 import struct
 import sys
+import time
 from datetime import datetime
 
 import serial
@@ -43,6 +44,13 @@ PAYLOAD_FMT = ">IH"  # matches firmware ustruct.pack('>BBIH', ...)
 
 VALID_CHANNELS = set(range(MAX_PPG_CHANNELS)) | {ECG_CHANNEL}
 
+# How often the open CSVs get fsync'd. Python already buffers writes
+# (default ~8 KB per file), so per-sample flushing is what was actually
+# killing throughput — every sample paid an OS write+sync syscall. With
+# this we batch into Python's buffer and only force-flush periodically
+# so the webapp's live-view poll (≥1 s cadence) still sees fresh data.
+FLUSH_INTERVAL_S = 0.2
+
 
 def make_session_dir():
     # Honour SEAL_PPG_SESSION_DIR so the webapp can pre-create the folder and
@@ -51,7 +59,9 @@ def make_session_dir():
     if override:
         os.makedirs(override, exist_ok=True)
         return override
-    base = os.path.dirname(os.path.abspath(__file__))
+    # Recordings live flat under MDPIdata/, matching the webapp's
+    # sessions_root(). os.makedirs creates the MDPIdata parent too.
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "MDPIdata")
     name = "session_" + datetime.now().strftime("%Y%m%d_%H%M%S")
     path = os.path.join(base, name)
     os.makedirs(path, exist_ok=True)
@@ -97,6 +107,8 @@ def main():
     text_line = b""             # accumulates non-binary status bytes
 
     print(f"Recording from {PORT} @ {BAUD}. Ctrl+C to stop.")
+
+    last_flush_t = time.monotonic()
 
     try:
         while True:
@@ -146,7 +158,9 @@ def main():
                 else:
                     f = open_ppg_file(session_dir, channel, files)
                     f.write(f"{timestamp_us},{sample}\n")
-                f.flush()
+                # NOTE: no per-sample f.flush() — Python's own write buffer
+                # absorbs the burst, and we fsync all files together at
+                # FLUSH_INTERVAL_S below. This was the main per-sample cost.
                 counts[channel] += 1
                 buffer = buffer[PACKET_LEN:]
 
@@ -160,6 +174,20 @@ def main():
                         if counts[ch]
                     ]
                     print(f"[recv] {total} samples ({' '.join(parts)})")
+
+            # Outer loop: after draining every complete packet from this
+            # chunk, fsync all open CSVs at most every FLUSH_INTERVAL_S.
+            # Bounds how stale the on-disk data can be (≤ the interval)
+            # while paying the syscall cost ~5×/s instead of once per
+            # sample.
+            now = time.monotonic()
+            if now - last_flush_t >= FLUSH_INTERVAL_S:
+                for fh in files.values():
+                    try:
+                        fh.flush()
+                    except (IOError, OSError):
+                        pass
+                last_flush_t = now
 
     except KeyboardInterrupt:
         print("\nStopped.")

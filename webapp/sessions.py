@@ -18,27 +18,66 @@ import glob
 import json
 import os
 import re
+import shutil
 from datetime import datetime
 
 SESSION_PATTERN = re.compile(r"^session_(\d{8})_(\d{6})$")
 PARTICIPANT_FILENAME = "participant.json"
+SESSIONS_SUBDIR = "MDPIdata"
+
+# Fixed mux-lane → body-site wiring, identical across every session on
+# this rig. Used as the fallback whenever a session's participant.json
+# leaves a channel's site blank; an explicit non-empty value in the file
+# still wins.
+DEFAULT_CHANNEL_SITES = {
+    "0": "finger",
+    "1": "earlobe",
+    "2": "shoulder",
+    "3": "forehead",
+    "4": "wrist",
+}
+
+
+def _with_default_sites(meta):
+    """Merge DEFAULT_CHANNEL_SITES into a metadata dict without clobbering
+    any site the file set explicitly."""
+    meta = dict(meta or {})
+    sites = dict(meta.get("channel_sites") or {})
+    for ch, site in DEFAULT_CHANNEL_SITES.items():
+        if not sites.get(ch):
+            sites[ch] = site
+    meta["channel_sites"] = sites
+    meta.setdefault("participant_id", "")
+    meta.setdefault("fitzpatrick", None)
+    meta.setdefault("notes", "")
+    return meta
 
 
 def repo_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def sessions_root():
+    """Folder that actually holds the session_*/ recordings.
+
+    Recordings live flat under MDPIdata/ (MDPIdata/session_<ts>/), not the
+    repo root. Created on demand so a fresh checkout works first run."""
+    root = os.path.join(repo_root(), SESSIONS_SUBDIR)
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
 def session_path(name):
-    return os.path.join(repo_root(), name)
+    return os.path.join(sessions_root(), name)
 
 
 def list_sessions():
     """Return summary dicts for every session_*/ folder, newest first."""
     out = []
-    for entry in os.listdir(repo_root()):
+    for entry in os.listdir(sessions_root()):
         if not SESSION_PATTERN.match(entry):
             continue
-        full = os.path.join(repo_root(), entry)
+        full = os.path.join(sessions_root(), entry)
         if not os.path.isdir(full):
             continue
         out.append(summarize_session(entry, lightweight=True))
@@ -113,14 +152,18 @@ def estimate_duration(session_dir):
 
 
 def load_participant_metadata(name):
+    """Always returns a usable metadata dict (never None) with the fixed
+    channel→site map filled in, so every consumer — the session list,
+    the detail meta grid, and the SQI table — labels channels the same
+    way even for sessions captured before participant.json existed."""
     p = os.path.join(session_path(name), PARTICIPANT_FILENAME)
     if not os.path.isfile(p):
-        return None
+        return _with_default_sites({})
     try:
         with open(p, "r") as f:
-            return json.load(f)
+            return _with_default_sites(json.load(f))
     except (IOError, json.JSONDecodeError):
-        return None
+        return _with_default_sites({})
 
 
 def save_participant_metadata(name, metadata):
@@ -128,3 +171,21 @@ def save_participant_metadata(name, metadata):
     os.makedirs(full, exist_ok=True)
     with open(os.path.join(full, PARTICIPANT_FILENAME), "w") as f:
         json.dump(metadata, f, indent=2)
+
+
+def delete_session(name):
+    """Permanently remove a session_*/ folder and everything in it.
+
+    Defensive on purpose: the name must match SESSION_PATTERN and the
+    resolved path must sit directly inside sessions_root(), so a crafted
+    name can't rmtree something outside the data directory.
+    """
+    if not SESSION_PATTERN.match(name):
+        raise ValueError("invalid session name")
+    full = os.path.abspath(session_path(name))
+    root = os.path.abspath(sessions_root())
+    if os.path.dirname(full) != root:
+        raise ValueError("refusing to delete path outside sessions root")
+    if not os.path.isdir(full):
+        raise FileNotFoundError(name)
+    shutil.rmtree(full)

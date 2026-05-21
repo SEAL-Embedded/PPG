@@ -152,12 +152,8 @@ SLOT_GREEN_PILOT = 0x07
 
 MAX_30105_EXPECTED_PART_ID = 0x15
 
-# Size of the queued readings.
-# Bumped from 4 → 32 so a single check() can stash a fully-drained
-# sensor FIFO (max 32 entries) without overwriting its own oldest
-# entries before fullpipico.py pops them. Restored to 4 if you copy
-# __init__.py.bak over this file.
-STORAGE_QUEUE_SIZE = 32
+# Size of the queued readings
+STORAGE_QUEUE_SIZE = 4
 
 
 # Data structure to hold the last readings
@@ -685,12 +681,7 @@ class MAX30102(object):
                         self.fifo_bytes_to_int(fifo_bytes[6:9])
                     )
 
-            # Drain the WHOLE FIFO before returning; the original library
-            # had this return inside the for-loop so check() only ever
-            # pulled one sample, which is what neutered drain-all in the
-            # firmware. Restored to one-sample behavior by copying
-            # __init__.py.bak over this file.
-            return True
+                return True
 
         else:
             return False

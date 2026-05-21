@@ -26,7 +26,7 @@ import pyhrv.frequency_domain as fd
 
 # Path to the raw PPG CSV file (column 0 = timestamp µs, column 1 = IR value)
 #file_path = os.path.join("PPG", "day1test2530.csv")
-file_path = "session_20260516_174059\\ppg_data_ch2.csv"
+file_path = "MDPIdata\\session_20260521_162352\\ppg_data_ch0.csv"
 
 # Nominal sampling interval and rate (used for timestamp correction and resampling)
 time_interval = 1/750       # seconds per sample (750 Hz)

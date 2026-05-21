@@ -24,6 +24,7 @@ import re
 
 import numpy as np
 import pandas as pd
+from scipy.signal import butter, filtfilt
 
 from sqi.ccc import (
     bandpass,
@@ -71,6 +72,29 @@ def load_ecg(path):
     return ts_us[valid] / 1000.0, sig[valid], leads_off[valid].astype(int)
 
 
+def ppg_bandpass(sig, fs, lowcut=0.6, highcut=3.3, order=2):
+    """The cardiac bandpass ppgvis.py applies to PPG: zero-phase
+    Butterworth, 0.6-3.3 Hz, order 2 (signal_visualization/ppgvis.py
+    bandpass()). Filters the full-resolution signal so decimation
+    afterwards preserves the filtered waveform.
+
+    Returns None when the channel's fs/length can't support the filter
+    (NaN fs, cutoffs not below Nyquist, or too few samples for filtfilt)
+    so the front end can grey out that channel's checkbox.
+    """
+    if not np.isfinite(fs) or fs <= 0:
+        return None
+    nyq = 0.5 * fs
+    low, high = lowcut / nyq, highcut / nyq
+    if not (0.0 < low < high < 1.0):
+        return None
+    b, a = butter(order, [low, high], btype="band")
+    # filtfilt's default padlen is 3*max(len(a),len(b)); guard short signals.
+    if len(sig) <= 3 * max(len(a), len(b)):
+        return None
+    return filtfilt(b, a, sig)
+
+
 def infer_fs(ts_ms):
     if len(ts_ms) < 2:
         return float("nan")
@@ -81,10 +105,38 @@ def infer_fs(ts_ms):
 # ── Signal loader for the Plotly views ───────────────────────────────────────
 
 def _downsample(x, y, max_points):
-    if max_points <= 0 or len(x) <= max_points:
+    """Peak-preserving (min/max) decimation.
+
+    Plain stride subsampling aliases sharp features: an ECG QRS is a
+    ~10 ms spike, so ``x[::22]`` on a 323 Hz trace samples R-peaks on
+    their edges or skips them, and the webapp ECG no longer matches
+    fullvis.py (which plots every sample). Splitting into buckets and
+    keeping each bucket's min and max sample, in time order, retains
+    R-peak height and position at any point budget. Smooth PPG is
+    unaffected. x stays monotonic so the front-end interpY still works.
+    """
+    n = len(x)
+    if max_points <= 0 or n <= max_points:
         return x, y
-    stride = max(1, len(x) // max_points)
-    return x[::stride], y[::stride]
+    n_buckets = max(1, max_points // 2)
+    edges = np.linspace(0, n, n_buckets + 1, dtype=int)
+    idx = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        if hi <= lo:
+            continue
+        seg = y[lo:hi]
+        i_min = lo + int(np.argmin(seg))
+        i_max = lo + int(np.argmax(seg))
+        if i_min == i_max:
+            idx.append(i_min)
+        elif i_min < i_max:
+            idx.append(i_min)
+            idx.append(i_max)
+        else:
+            idx.append(i_max)
+            idx.append(i_min)
+    sel = np.asarray(idx, dtype=int)
+    return x[sel], y[sel]
 
 
 def _leads_off_spans(ts_s, leads_off):
@@ -111,7 +163,8 @@ def _channel_paths(session_dir):
     return paths
 
 
-def load_session_signals(name, max_points=5000, tail_seconds=None):
+def load_session_signals(name, max_points=5000, tail_seconds=None,
+                          start_s=None, end_s=None):
     """Return ECG + each PPG channel, downsampled to ``max_points``.
 
     This is the data the frontend needs to reproduce ``fullvis.py``'s
@@ -124,6 +177,10 @@ def load_session_signals(name, max_points=5000, tail_seconds=None):
     ``tail_seconds`` of recorded data. That's how the live-view poll
     keeps payload size and Plotly render cost flat regardless of how
     long the recording has been running.
+
+    ``start_s`` / ``end_s`` apply the user's pre-processing crop
+    (seconds since the session origin t0). The crop happens before the
+    bandpass, so the displayed bandpass matches the cropped window.
     """
     sdir = sessions.session_path(name)
     if not os.path.isdir(sdir):
@@ -138,6 +195,8 @@ def load_session_signals(name, max_points=5000, tail_seconds=None):
         if len(ts_ms):
             t0_ms = float(ts_ms[0])
             ts_ms, sig, leads_off = _tail(ts_ms, sig, leads_off, tail_seconds)
+            ts_ms, (sig, leads_off) = _crop_window(
+                ts_ms, [sig, leads_off], t0_ms, start_s, end_s)
             ts_s = (ts_ms - t0_ms) / 1000.0
             xs, ys = _downsample(ts_s, sig, max_points)
             ecg_payload = {
@@ -157,18 +216,50 @@ def load_session_signals(name, max_points=5000, tail_seconds=None):
         if t0_ms is None:
             t0_ms = float(ts_ms[0])
         ts_ms, sig, _ = _tail(ts_ms, sig, None, tail_seconds)
+        ts_ms, (sig,) = _crop_window(ts_ms, [sig], t0_ms, start_s, end_s)
+        if not len(ts_ms):
+            continue
         ts_s = (ts_ms - t0_ms) / 1000.0
+        fs = infer_fs(ts_ms)
         xs, ys = _downsample(ts_s, sig, max_points)
+
+        bp = ppg_bandpass(sig, fs)
+        if bp is not None:
+            xb, yb = _downsample(ts_s, bp, max_points)
+            bp_x, bp_y = xb.tolist(), yb.tolist()
+        else:
+            bp_x, bp_y = None, None
+
         channels.append({
             "channel": ch,
             "name": f"ch{ch}",
             "time_s": xs.tolist(),
             "signal": ys.tolist(),
-            "fs_hz": infer_fs(ts_ms),
+            "time_bp_s": bp_x,
+            "signal_bp": bp_y,
+            "fs_hz": fs,
             "n_samples": int(len(sig)),
         })
 
     return {"ecg": ecg_payload, "channels": channels}
+
+
+def _crop_window(ts_ms, arrays, t0_ms, start_s, end_s):
+    """Keep only samples whose time (seconds since the session origin
+    ``t0_ms``) falls in [start_s, end_s]. This is the pre-processing
+    crop: it runs on the raw signal before the bandpass and before any
+    peak detection, so the bandpass and every SQI/CCC metric are
+    computed on exactly the selected window. ``arrays`` are sliced with
+    the same mask; None entries pass through."""
+    if start_s is None and end_s is None:
+        return ts_ms, arrays
+    rel_s = (ts_ms - t0_ms) / 1000.0
+    mask = np.ones(len(ts_ms), dtype=bool)
+    if start_s is not None:
+        mask &= rel_s >= float(start_s)
+    if end_s is not None:
+        mask &= rel_s <= float(end_s)
+    return ts_ms[mask], [a[mask] if a is not None else None for a in arrays]
 
 
 def _tail(ts_ms, sig, leads_off, tail_seconds):
@@ -278,8 +369,13 @@ def analyze_channel(ppg_ts_ms, ppg_sig, ecg_ts_ms, ecg_sig, t0_ms=0.0,
     return result
 
 
-def analyze_session(name):
+def analyze_session(name, start_s=None, end_s=None):
     """Walk a session_<ts>/, run analyze_channel on every PPG channel.
+
+    ``start_s`` / ``end_s`` crop every signal to that window (seconds
+    since the session origin = ECG's first timestamp) before any peak
+    detection, so SSQI, ZSQI, R-peaks, RR/PPI and CCC are all computed
+    on the selected window only.
 
     The ECG R-peak detection happens once at the session level (it's
     the same R-peak series no matter which PPG channel we're agreeing
@@ -296,7 +392,12 @@ def analyze_session(name):
         return {"error": "session has no ecg_data.csv", "results": []}
 
     ecg_ts_ms, ecg_sig, leads_off = load_ecg(ecg_path)
+    # t0 = session origin (first ECG sample), set before cropping so the
+    # window is interpreted in the same absolute seconds the dashboard
+    # plots use.
     t0_ms = float(ecg_ts_ms[0]) if len(ecg_ts_ms) else 0.0
+    ecg_ts_ms, (ecg_sig, leads_off) = _crop_window(
+        ecg_ts_ms, [ecg_sig, leads_off], t0_ms, start_s, end_s)
     ecg_fs = infer_fs(ecg_ts_ms)
 
     try:
@@ -304,7 +405,10 @@ def analyze_session(name):
     except Exception:
         ecg_peaks = np.array([], dtype=int)
 
-    duration_s = ((float(ecg_ts_ms[-1]) - t0_ms) / 1000.0) if len(ecg_ts_ms) > 1 else 0.0
+    # Span of the (possibly cropped) ECG itself, not time-since-origin —
+    # otherwise a window starting at 10 s inflates duration (and deflates
+    # mean HR) by the uncounted lead-in.
+    duration_s = ((float(ecg_ts_ms[-1]) - float(ecg_ts_ms[0])) / 1000.0) if len(ecg_ts_ms) > 1 else 0.0
     mean_hr = (60.0 * len(ecg_peaks) / duration_s) if (duration_s > 0 and len(ecg_peaks)) else float("nan")
 
     ecg_info = {
@@ -325,6 +429,8 @@ def analyze_session(name):
     results = []
     for ch, p in _channel_paths(sdir):
         ppg_ts_ms, ppg_sig = load_ppg(p)
+        ppg_ts_ms, (ppg_sig,) = _crop_window(
+            ppg_ts_ms, [ppg_sig], t0_ms, start_s, end_s)
         r = analyze_channel(ppg_ts_ms, ppg_sig, ecg_ts_ms, ecg_sig, t0_ms=t0_ms)
         r["channel"] = ch
         r["site"] = site_map.get(str(ch), "")

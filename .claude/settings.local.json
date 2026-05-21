@@ -6,7 +6,11 @@
       "Bash(git checkout *)",
       "Bash(git pull *)",
       "Bash(git merge --no-ff feature/zcr-sqi -m ' *)",
-      "Bash(git stash *)"
+      "Bash(git stash *)",
+      "PowerShell(Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, Path })",
+      "PowerShell(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalAddress -in '127.0.0.1','0.0.0.0','::1','::' -and $_.LocalPort -ge 3000 -and $_.LocalPort -le 9999 } | Select-Object LocalAddress, LocalPort, OwningProcess | Sort-Object LocalPort; echo \"--- python procs ---\"; Get-Process python,python3,pythonw,uvicorn -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, Path)",
+      "PowerShell(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ge 3000 -and $_.LocalPort -le 9999 } | Select-Object LocalAddress, LocalPort, OwningProcess | Sort-Object LocalPort | Format-Table -AutoSize)",
+      "PowerShell(Get-Process -Id 120948 -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, Path, @{n='CmdLine';e={\\(Get-CimInstance Win32_Process -Filter \"ProcessId=$\\($_.Id\\)\"\\).CommandLine}} | Format-List)"
     ]
   }
 }

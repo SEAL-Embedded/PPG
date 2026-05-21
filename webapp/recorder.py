@@ -46,7 +46,7 @@ class Recorder:
 
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             session_name = f"session_{stamp}"
-            session_dir = os.path.join(REPO_ROOT, session_name)
+            session_dir = os.path.join(sessions.sessions_root(), session_name)
             os.makedirs(session_dir, exist_ok=True)
 
             env = os.environ.copy()

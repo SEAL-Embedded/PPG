@@ -2,7 +2,22 @@
   "permissions": {
     "allow": [
       "PowerShell(python -c \"import serial; print\\(serial.__file__\\); print\\(getattr\\(serial,'VERSION','no VERSION'\\)\\)\")",
-      "Bash(git -C c:/Research/PPG mv picoDataUnpacking.py old_picoDataUnpacking.py)"
+      "Bash(git -C c:/Research/PPG mv picoDataUnpacking.py old_picoDataUnpacking.py)",
+      "Bash(ls \"C:/Users/karle/.claude/projects/c--Research-PPG/memory/\" 2>/dev/null && echo \"---MEMORY.md---\" && cat \"C:/Users/karle/.claude/projects/c--Research-PPG/memory/MEMORY.md\" 2>/dev/null)",
+      "Read(//c/Users/karle/.claude/projects/c--Research-PPG/memory/**)",
+      "Bash(ls -la \"C:/Users/karle/.claude/projects/c--Research-PPG/\" 2>/dev/null; echo \"--- project memory dir? ---\"; ls \"c:/Research/PPG/memory/\" 2>/dev/null; echo \"--- other sqi ---\"; ls \"c:/Research/PPG/sqi/\")",
+      "Read(//c/Users/karle/.claude/projects/c--Research-PPG/**)",
+      "Bash(python -c \"import os; print\\(os.path.dirname\\(os.path.dirname\\(os.path.abspath\\('webapp/sessions.py'\\)\\)\\)\\)\")",
+      "Bash(python -c \"from webapp import sessions; print\\('root:', sessions.sessions_root\\(\\)\\); [print\\(s['name'], s['channels'], 'ecg=' + str\\(s['has_ecg']\\)\\) for s in sessions.list_sessions\\(\\)]\")",
+      "Bash(python -c ' *)",
+      "Bash(py -3 -c \"import numpy; print\\('py launcher numpy', numpy.__version__\\)\")",
+      "Bash(where python *)",
+      "Bash(ls .venv venv env)",
+      "Bash(python -c \"import sys;print\\(sys.executable\\)\")",
+      "Bash(py -3 -c ' *)",
+      "Bash(py -3 -c \"import sys; sys.path.insert\\(0,'.'\\); import webapp.api, webapp.analysis, webapp.sessions; print\\('imports OK'\\)\")",
+      "Bash(node --check webapp/static/app.js)",
+      "Bash(py -3 -m py_compile PPG_ECG_Full_Unpacking.py)"
     ]
   }
 }

@@ -106,8 +106,17 @@
           <button id="btn-analyze">Run analysis</button>
           <button id="btn-reload-signals" class="ghost">Reload signals</button>
           <button id="btn-save-meta" class="ghost">Save metadata</button>
+          <div class="range-ctl">
+            <span class="rl">Window (s)</span>
+            <input id="win-start" type="number" step="1" min="0" placeholder="start">
+            <span class="rl">–</span>
+            <input id="win-end" type="number" step="1" min="0" placeholder="end">
+            <button id="btn-win-apply" class="ghost mini">Apply</button>
+            <button id="btn-win-full" class="ghost mini">Full</button>
+          </div>
           <div class="spacer"></div>
           <span class="muted mono" id="analysis-status"></span>
+          <button id="btn-delete" class="danger mini">Delete session</button>
         </div>
       </div>
 
@@ -124,7 +133,10 @@
       <section class="block" id="ppg-block">
         <div class="header-row">
           <p class="eyebrow">PPG channels</p>
-          <span class="right" id="ppg-summary"></span>
+          <div class="hdr-actions">
+            <button id="btn-bp-all" class="ghost mini hidden">Bandpass all</button>
+            <span class="right" id="ppg-summary"></span>
+          </div>
         </div>
         <div class="ppg-grid" id="ppg-grid"></div>
       </section>
@@ -151,6 +163,24 @@
   </section>
 
 </main>
+
+<!-- Delete confirmation modal -->
+<div id="delete-modal" class="modal-overlay hidden">
+  <div class="modal">
+    <h3>Delete session</h3>
+    <p class="modal-text" id="delete-modal-text"></p>
+    <p class="modal-warn">This permanently removes the session folder and every CSV in it. It cannot be undone.</p>
+    <label class="modal-label" for="delete-confirm-select">To confirm, choose an action:</label>
+    <select id="delete-confirm-select">
+      <option value="">— select to enable Delete —</option>
+      <option value="delete">Permanently delete this session</option>
+    </select>
+    <div class="modal-actions">
+      <button id="delete-cancel" class="ghost">Cancel</button>
+      <button id="delete-confirm" class="danger" disabled>Delete</button>
+    </div>
+  </div>
+</div>
 
 <script src="/static/app.js"></script>
 </body>

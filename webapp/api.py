@@ -84,18 +84,34 @@ def post_metadata(name: str, meta: ParticipantMetadata):
     return {"ok": True}
 
 
+@app.delete("/api/sessions/{name}")
+def delete_session(name: str):
+    _require_session(name)
+    status = _recorder.status()
+    if status.get("active") and status.get("session_name") == name:
+        raise HTTPException(409, "cannot delete the session that is currently recording")
+    try:
+        sessions.delete_session(name)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
 @app.get("/api/sessions/{name}/signals")
-def get_signals(name: str, max_points: int = 5000, tail_seconds: Optional[float] = None):
+def get_signals(name: str, max_points: int = 5000, tail_seconds: Optional[float] = None,
+                start_s: Optional[float] = None, end_s: Optional[float] = None):
     _require_session(name)
     return analysis.load_session_signals(
         name, max_points=max_points, tail_seconds=tail_seconds,
+        start_s=start_s, end_s=end_s,
     )
 
 
 @app.post("/api/sessions/{name}/analyze")
-def analyze_session(name: str):
+def analyze_session(name: str, start_s: Optional[float] = None,
+                    end_s: Optional[float] = None):
     _require_session(name)
-    return analysis.analyze_session(name)
+    return analysis.analyze_session(name, start_s=start_s, end_s=end_s)
 
 
 # ── Recording lifecycle ──────────────────────────────────────────────────────
