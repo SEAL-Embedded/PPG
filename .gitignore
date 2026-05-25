@@ -6,8 +6,18 @@ __pycache__/
 # Captured session data — user recordings, never check in
 session_*/
 
+# Dashboard runtime outputs — regenerated on each Analyze-all /
+# sleepiness-summary run. Keep the directories (their READMEs are
+# tracked) but never check in the per-run JSON snapshots.
+MDPIdata/batch_analyses/*.json
+MDPIdata/sleepiness_runs/*.json
+
 # Nested historical clone (separate .git)
 sqi/PPG/
+
+# Harness / agent lock files
+.claude/scheduled_tasks.lock
+.claude/tasks.lock
 
 # Editor / OS
 .vscode/

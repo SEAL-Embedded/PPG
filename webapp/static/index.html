@@ -14,6 +14,7 @@
   <span class="spacer"></span>
   <span class="session-chip" id="session-chip"></span>
   <span class="status" id="status"><span class="dot"></span><span id="status-label">idle</span></span>
+  <button id="btn-help" class="help-btn" title="Open the onboarding guide" aria-label="Show onboarding guide">?</button>
 </header>
 
 <main id="main">
@@ -83,6 +84,11 @@
     <div class="form-group session-search">
       <input id="session-filter" placeholder="Filter by ID or date…">
     </div>
+    <button id="btn-analyze-all" class="primary mini" title="Run SSQI / ZSQI / CCC / ICC across every session in MDPIdata/ and aggregate by body site">▦ Analyze all sessions</button>
+    <div class="batch-archive-row" id="batch-archive-row">
+      <span class="label">Past batch runs <span class="count" id="batch-archive-count">0</span></span>
+      <button id="btn-browse-archive" class="browse-btn" disabled title="Browse previously saved batch analyses">Browse archive</button>
+    </div>
     <ul class="session-list" id="session-list"></ul>
   </aside>
 
@@ -91,7 +97,47 @@
 
     <div id="no-session" class="no-session">
       <h2>No session selected</h2>
-      <p>Pick a session from the list to view its signals and SQI metrics, or start a new recording from the left.</p>
+      <p>Pick a session from the list to view its signals and SQI metrics, or start a new recording from the left.<br>
+      Use <b>Analyze all sessions</b> in the Sessions panel to score every MDPIdata recording in one pass.</p>
+    </div>
+
+    <!-- Batch (every-session) results view — shown after Analyze all sessions -->
+    <div id="batch" class="hidden">
+      <div class="detail-header">
+        <p class="eyebrow">Batch analysis · MDPIdata <span id="batch-source-tag"></span></p>
+        <h1 class="detail-title" id="batch-title">All sessions</h1>
+
+        <div class="action-row">
+          <button id="btn-batch-rerun">Re-run</button>
+          <button id="btn-batch-close" class="ghost">Close batch view</button>
+          <button id="btn-batch-export" class="ghost" title="Download the per-site aggregate as CSV">⤓ Export CSV</button>
+          <div class="spacer"></div>
+          <span class="muted mono" id="batch-status"></span>
+        </div>
+
+        <div class="meta-grid" id="batch-meta"></div>
+      </div>
+
+      <!-- Plain-English interpretation: headline, per-site verdicts, notes -->
+      <section class="block hidden" id="batch-interp-block">
+        <div class="interp-block" id="batch-interp"></div>
+      </section>
+
+      <section class="block" id="batch-per-site-block">
+        <div class="header-row">
+          <p class="eyebrow">Per-site aggregate</p>
+          <span class="right" id="batch-per-site-summary"></span>
+        </div>
+        <div class="sqi-wrap"><table class="sqi-table" id="batch-per-site-table"></table></div>
+      </section>
+
+      <section class="block" id="batch-per-channel-block">
+        <div class="header-row">
+          <p class="eyebrow">Per-session × per-channel</p>
+          <span class="right" id="batch-per-channel-summary"></span>
+        </div>
+        <div class="sqi-wrap"><table class="sqi-table" id="batch-per-channel-table"></table></div>
+      </section>
     </div>
 
     <div id="detail" class="hidden">
@@ -106,6 +152,7 @@
           <button id="btn-analyze">Run analysis</button>
           <button id="btn-reload-signals" class="ghost">Reload signals</button>
           <button id="btn-save-meta" class="ghost">Save metadata</button>
+          <button id="btn-receiver-log" class="ghost" disabled title="View the captured receiver subprocess log">View receiver log</button>
           <div class="range-ctl">
             <span class="rl">Window (s)</span>
             <input id="win-start" type="number" step="1" min="0" placeholder="start">
@@ -141,6 +188,11 @@
         <div class="ppg-grid" id="ppg-grid"></div>
       </section>
 
+      <!-- Plain-English interpretation: headline + per-channel verdict cards + notes -->
+      <section class="block hidden" id="session-interp-block">
+        <div class="interp-block" id="session-interp"></div>
+      </section>
+
       <!-- SQI table -->
       <section class="block" id="sqi-block">
         <div class="header-row">
@@ -156,6 +208,21 @@
           <p class="eyebrow">Bland-Altman per channel</p>
         </div>
         <div class="ba-grid" id="ba-grid"></div>
+      </section>
+
+      <!-- Run history (collapsible) -->
+      <section class="block" id="history-block">
+        <div class="header-row">
+          <p class="eyebrow">Run history</p>
+          <span class="right" id="history-summary"></span>
+        </div>
+        <div class="history-panel">
+          <div class="history-head">
+            <button id="btn-history-toggle" class="toggle" aria-expanded="false">▸ Show history</button>
+            <button id="btn-history-reload" class="reload" aria-label="Reload history">⟳ reload</button>
+          </div>
+          <ul id="history-list" class="history-list hidden"></ul>
+        </div>
       </section>
 
     </div>
@@ -178,6 +245,52 @@
     <div class="modal-actions">
       <button id="delete-cancel" class="ghost">Cancel</button>
       <button id="delete-confirm" class="danger" disabled>Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- Receiver log viewer modal -->
+<div id="recv-log-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="recv-log-title">
+  <div class="modal log-modal">
+    <h3 id="recv-log-title">Receiver log</h3>
+    <p class="modal-text" id="recv-log-meta"></p>
+    <pre class="log-pre" id="recv-log-pre"></pre>
+    <div class="modal-actions">
+      <button id="recv-log-refresh" class="ghost">⟳ Refresh</button>
+      <button id="recv-log-close">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Batch archive list modal -->
+<div id="batch-archive-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="batch-archive-title">
+  <div class="modal log-modal">
+    <h3 id="batch-archive-title">Past batch runs</h3>
+    <p class="modal-text">Select a saved batch to reload its results — no re-run needed.</p>
+    <ul id="archive-list" class="archive-list"></ul>
+    <div class="modal-actions">
+      <button id="batch-archive-close">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- First-launch onboarding modal -->
+<div id="onb-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="onb-title">
+  <div class="modal onb-modal">
+    <div class="onb-stage">
+      <p class="onb-eyebrow" id="onb-step">Step 1 of 6</p>
+      <h3 class="onb-title" id="onb-title">Welcome</h3>
+      <div class="onb-body" id="onb-body"></div>
+    </div>
+    <div class="onb-foot">
+      <div class="onb-dots" id="onb-dots"></div>
+      <label class="onb-skip">
+        <input type="checkbox" id="onb-skip-cb"> Don't show again
+      </label>
+      <div class="onb-nav">
+        <button id="onb-back">Back</button>
+        <button id="onb-next" class="primary">Next</button>
+      </div>
     </div>
   </div>
 </div>

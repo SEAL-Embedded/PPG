@@ -80,7 +80,16 @@ def get_session(name: str):
 @app.post("/api/sessions/{name}/metadata")
 def post_metadata(name: str, meta: ParticipantMetadata):
     _require_session(name)
-    sessions.save_participant_metadata(name, meta.dict())
+    # Capture the previous metadata before overwriting so the
+    # `metadata_edited` history event carries a diff-friendly
+    # before/after pair (matches the spec's history schema).
+    before = sessions.load_participant_metadata(name)
+    after = meta.dict()
+    sessions.save_participant_metadata(name, after)
+    sessions.append_history(name, "metadata_edited", {
+        "before": before,
+        "after": after,
+    })
     return {"ok": True}
 
 
@@ -107,11 +116,113 @@ def get_signals(name: str, max_points: int = 5000, tail_seconds: Optional[float]
     )
 
 
+def _compact_analysis_summary(result):
+    """Per-channel {ccc, icc, matched} dict used inside the history
+    `analysis_run` event. Keeps history.jsonl tiny while the full result
+    lives in analysis.json. NaN floats become None for strict-JSON safety."""
+    import math
+    summary = {}
+    for row in (result.get("results") or []):
+        ch = row.get("channel")
+        if ch is None:
+            continue
+        stats = row.get("stats") or {}
+        def _clean(v):
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                return None
+            return v
+        summary[str(ch)] = {
+            "ccc": _clean(stats.get("ccc")),
+            "icc": _clean(stats.get("icc")),
+            "matched": int(row.get("n_matched_beats") or 0),
+        }
+    return summary
+
+
+def _persist_session_analysis(name, result, start_s, end_s):
+    """Write analysis.json + append the analysis_run history event.
+    Errors are swallowed by the sessions.* helpers so a write failure
+    never makes the analyse endpoint return 500 — the caller still gets
+    the live result they asked for."""
+    crop = {"start_s": start_s, "end_s": end_s}
+    sessions.save_session_analysis(name, result, crop)
+    sessions.append_history(name, "analysis_run", {
+        "crop_window": crop,
+        "n_channels": len(result.get("results") or []),
+        "summary": _compact_analysis_summary(result),
+    })
+
+
 @app.post("/api/sessions/{name}/analyze")
 def analyze_session(name: str, start_s: Optional[float] = None,
                     end_s: Optional[float] = None):
     _require_session(name)
-    return analysis.analyze_session(name, start_s=start_s, end_s=end_s)
+    result = analysis.analyze_session(name, start_s=start_s, end_s=end_s)
+    _persist_session_analysis(name, result, start_s, end_s)
+    return result
+
+
+# Batch over every session_*/ folder under MDPIdata/. Same crop window
+# semantics as the single-session endpoint — start_s/end_s are seconds
+# since each session's ECG t0, applied independently per session.
+@app.post("/api/analyze_all")
+def analyze_all(start_s: Optional[float] = None, end_s: Optional[float] = None):
+    result = analysis.analyze_all_sessions(start_s=start_s, end_s=end_s)
+    # Save the batch snapshot under MDPIdata/batch_analyses/. The helper
+    # mutates result with batch_id + created_at so what we return and
+    # what's on disk are byte-identical.
+    result = sessions.save_batch_analysis(result)
+    batch_id = result.get("batch_id")
+    sessions_list = result.get("sessions") or []
+    total = len(sessions_list)
+    for i, s in enumerate(sessions_list, start=1):
+        sname = s.get("session_name")
+        if not sname:
+            continue
+        sessions.append_history(sname, "batch_analysis_included", {
+            "batch_id": batch_id,
+            "session_position": i,
+            "total": total,
+        })
+    return result
+
+
+# ── Persistence read endpoints ───────────────────────────────────────────────
+
+@app.get("/api/sessions/{name}/history")
+def get_session_history(name: str, limit: int = 500):
+    _require_session(name)
+    return sessions.read_history(name, limit=limit)
+
+
+@app.get("/api/sessions/{name}/analysis")
+def get_session_analysis(name: str):
+    _require_session(name)
+    cached = sessions.load_session_analysis(name)
+    if cached is None:
+        return {"cached": False}
+    return cached
+
+
+@app.get("/api/sessions/{name}/receiver_log")
+def get_session_receiver_log(name: str, tail: int = 500):
+    _require_session(name)
+    return {"log": sessions.tail_receiver_log(name, n=tail)}
+
+
+@app.get("/api/batch_analyses")
+def get_batch_analyses():
+    return sessions.list_batch_analyses()
+
+
+@app.get("/api/batch_analyses/{batch_id}")
+def get_batch_analysis(batch_id: str):
+    if not sessions.BATCH_PATTERN.match(batch_id):
+        raise HTTPException(400, "invalid batch id")
+    payload = sessions.load_batch_analysis(batch_id)
+    if payload is None:
+        raise HTTPException(404, f"batch not found: {batch_id}")
+    return payload
 
 
 # ── Recording lifecycle ──────────────────────────────────────────────────────
