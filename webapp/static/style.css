@@ -1369,3 +1369,115 @@ button.mini { padding: 5px 10px; font-size: 11px; }
   .onb-dot { width: 26px; height: 26px; font-size: 11px; }
   .onb-grid, .onb-file-list { grid-template-columns: 1fr; }
 }
+
+/* ── Cohort sleepiness summary view (Σ button) ───────────────────────────── */
+
+.slp-subtitle {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-mute);
+  margin: 0 0 16px;
+  letter-spacing: 0.04em;
+}
+
+.slp-caveats {
+  background: linear-gradient(180deg, var(--warn-soft), var(--panel));
+  border: 1px solid var(--warn);
+  border-left: 4px solid var(--warn);
+  border-radius: 4px;
+  padding: 16px 22px 18px;
+}
+.slp-caveats-head {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 12px;
+}
+.slp-caveats-icon {
+  width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--warn);
+  color: #2a1808;
+  font: 700 16px var(--sans);
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.slp-caveats-label {
+  font-family: var(--sans);
+  font-size: 14px; font-weight: 700;
+  color: var(--warn);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.slp-caveats ul {
+  margin: 0; padding-left: 22px;
+  color: var(--ink-2);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+.slp-caveats li {
+  margin-bottom: 8px;
+}
+.slp-caveats li::marker { color: var(--warn); }
+.slp-caveats li:last-child { margin-bottom: 0; }
+
+/* Methodology footer — muted, dashed border, fits below interpretation */
+.slp-method {
+  padding: 14px 18px;
+  background: var(--panel);
+  border: 1px dashed var(--hair);
+  border-radius: 3px;
+  color: var(--ink-mute);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.slp-method-label {
+  display: block;
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--ink-faint);
+  margin-bottom: 8px;
+}
+.slp-method p { margin: 0 0 8px; color: var(--ink-2); }
+.slp-method p:last-child { margin-bottom: 0; }
+.slp-method-refs {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+#slp-source-tag {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-mute);
+  margin-left: 8px;
+}
+#slp-source-tag .slp-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--hair);
+  border-radius: 999px;
+  margin-left: 6px;
+}
+#slp-source-tag .slp-tag.fresh   { color: var(--good); border-color: rgba(135,212,155,0.4); }
+#slp-source-tag .slp-tag.archive { color: var(--warn); border-color: rgba(232,176,112,0.4); }
+
+#slp-cohort-plot { min-height: 520px; }
+#slp-features-plot { min-height: 420px; }
+
+/* FST cross-tab placeholder when metadata is missing — same panel
+   styling as a no-data state. */
+#slp-fst-table.empty-state {
+  display: block;
+  padding: 18px 22px;
+  background: var(--panel);
+  color: var(--ink-mute);
+  font-size: 13px;
+  line-height: 1.55;
+  font-family: var(--sans);
+  border-top: 1px solid var(--hair);
+}
+
+/* History pill style for sleepiness events (reuses existing .hpill class) */
+.history-list .hpill.evt-sleepiness_analysis_included {
+  color: var(--info); background: var(--info-soft);
+  border-color: rgba(102, 196, 214, 0.32);
+}

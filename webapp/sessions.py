@@ -23,12 +23,14 @@ from datetime import datetime
 
 SESSION_PATTERN = re.compile(r"^session_(\d{8})_(\d{6})$")
 BATCH_PATTERN = re.compile(r"^batch_\d{8}_\d{6}$")
+SLEEPINESS_PATTERN = re.compile(r"^run_\d{8}_\d{6}$")
 PARTICIPANT_FILENAME = "participant.json"
 HISTORY_FILENAME = "history.jsonl"
 ANALYSIS_FILENAME = "analysis.json"
 RECEIVER_LOG_FILENAME = "receiver.log"
 SESSIONS_SUBDIR = "MDPIdata"
 BATCH_SUBDIR = "batch_analyses"
+SLEEPINESS_SUBDIR = "sleepiness_runs"
 
 # Fixed mux-lane → body-site wiring, identical across every session on
 # this rig. Used as the fallback whenever a session's participant.json
@@ -487,3 +489,95 @@ def load_batch_analysis(batch_id):
     except (IOError, OSError, json.JSONDecodeError) as e:
         print(f"[sessions] load_batch_analysis({batch_id}) failed: {e}")
         return None
+
+
+# ── Sleepiness-run archive ──────────────────────────────────────────────────
+
+def sleepiness_runs_root():
+    """Folder that holds the saved sleepiness-SPI runs. Created on demand
+    so the first /api/sleepiness_summary call works on a fresh checkout."""
+    root = os.path.join(sessions_root(), SLEEPINESS_SUBDIR)
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def save_sleepiness_run(payload):
+    """Persist a /api/sleepiness_summary snapshot under
+    MDPIdata/sleepiness_runs/ as run_<YYYYMMDD_HHMMSS>.json. Mutates
+    ``payload`` with ``run_id`` and ``created_at`` so the returned and
+    on-disk objects stay identical."""
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    run_id = f"run_{stamp}"
+    payload = dict(payload or {})
+    payload["run_id"] = run_id
+    payload["created_at"] = _utc_now_iso()
+    try:
+        path = os.path.join(sleepiness_runs_root(), f"{run_id}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(_coerce_jsonable(payload), f, indent=2)
+    except (IOError, OSError, TypeError) as e:
+        print(f"[sessions] save_sleepiness_run({run_id}) failed: {e}")
+    return payload
+
+
+def list_sleepiness_runs():
+    """List saved sleepiness runs, newest first. Returns shallow rows
+    `{run_id, created_at, n_sessions, weighting}` — full payloads go
+    through load_sleepiness_run / load_latest_sleepiness_run."""
+    root = sleepiness_runs_root()
+    out = []
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return out
+    for entry in entries:
+        if not entry.endswith(".json"):
+            continue
+        stem = entry[:-5]
+        if not SLEEPINESS_PATTERN.match(stem):
+            continue
+        full = os.path.join(root, entry)
+        try:
+            with open(full, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (IOError, OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        out.append({
+            "run_id": payload.get("run_id", stem),
+            "created_at": payload.get("created_at"),
+            "n_sessions": payload.get("n_sessions_usable", 0),
+            "weighting": payload.get("weighting", "ssqi_zsqi"),
+        })
+    out.sort(key=lambda r: r.get("run_id") or "", reverse=True)
+    return out
+
+
+def load_sleepiness_run(run_id):
+    """Load one saved sleepiness run by id. Returns None if the id is
+    malformed, points outside the archive folder, or the file can't be
+    read."""
+    if not SLEEPINESS_PATTERN.match(run_id or ""):
+        return None
+    root = os.path.abspath(sleepiness_runs_root())
+    full = os.path.abspath(os.path.join(root, f"{run_id}.json"))
+    # Defensive: same path-confinement check delete_session uses.
+    if os.path.dirname(full) != root:
+        return None
+    if not os.path.isfile(full):
+        return None
+    try:
+        with open(full, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (IOError, OSError, json.JSONDecodeError) as e:
+        print(f"[sessions] load_sleepiness_run({run_id}) failed: {e}")
+        return None
+
+
+def load_latest_sleepiness_run():
+    """Convenience: return the newest saved run, or None when none exist."""
+    runs = list_sleepiness_runs()
+    if not runs:
+        return None
+    return load_sleepiness_run(runs[0]["run_id"])
