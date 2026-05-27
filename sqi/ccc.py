@@ -44,16 +44,33 @@ from scipy.signal import find_peaks, butter, filtfilt
 # ── Filtering ────────────────────────────────────────────────────────────────
 
 def bandpass(signal, fs, low=0.5, high=40.0, order=2):
-    """Butterworth bandpass to remove baseline wander and high-freq noise."""
+    """Butterworth bandpass to remove baseline wander and high-freq noise.
+
+    Returns ``None`` when the input is too short for ``filtfilt`` (which
+    would otherwise raise). The ``padlen`` scipy uses is roughly
+    ``3*max(len(a), len(b))``; we use a conservative ``> 3 * order * 3``
+    guard that always lets honest signals through.
+    """
+    signal = np.asarray(signal)
     nyq = fs / 2.0
     b, a = butter(order, [low / nyq, high / nyq], btype='band')
+    padlen = 3 * max(len(a), len(b))
+    if len(signal) <= padlen:
+        return None
     return filtfilt(b, a, signal)
 
 
 def lowpass(signal, fs, cutoff=8.0, order=2):
-    """Butterworth lowpass for PPG (removes motion noise above 8 Hz)."""
+    """Butterworth lowpass for PPG (removes motion noise above 8 Hz).
+
+    Returns ``None`` when the input is too short for ``filtfilt``.
+    """
+    signal = np.asarray(signal)
     nyq = fs / 2.0
     b, a = butter(order, cutoff / nyq, btype='low')
+    padlen = 3 * max(len(a), len(b))
+    if len(signal) <= padlen:
+        return None
     return filtfilt(b, a, signal)
 
 
