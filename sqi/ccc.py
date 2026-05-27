@@ -121,6 +121,8 @@ def detect_r_peaks(ecg, fs):
     if np.abs(centered.min()) > centered.max():
         filtered = -filtered
     min_distance  = int(0.4 * fs)         # minimum 400 ms between beats (~150 BPM max)
+    # Threshold must be computed AFTER the polarity flip so it reflects the
+    # signal find_peaks actually sees.
     height_thresh = np.percentile(filtered, 90) * 0.5   # 50% of 90th percentile
     peaks, _ = find_peaks(filtered, distance=min_distance, height=height_thresh)
     return peaks

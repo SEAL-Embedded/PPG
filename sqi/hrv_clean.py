@@ -60,7 +60,15 @@ def clean_intervals(intervals_ms, times_s, range_ms=DEFAULT_RANGE_MS,
     """
     intervals = np.asarray(intervals_ms, dtype=float)
     times = np.asarray(times_s, dtype=float)
+    if len(intervals) != len(times):
+        raise ValueError(
+            "intervals_ms and times_s must have the same length"
+        )
+    if not (0.0 < karlsson_pct < 1.0):
+        raise ValueError("karlsson_pct must be in (0, 1)")
     n = len(intervals)
+    if n == 0:
+        return intervals.copy(), times.copy(), np.array([], dtype=bool)
 
     # Pass 1: physiological range gate
     low, high = range_ms
