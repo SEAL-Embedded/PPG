@@ -66,3 +66,45 @@ class TestAlignment:
         # Times of kept intervals
         np.testing.assert_array_equal(t_clean, times[mask])
         assert len(t_clean) == len(clean)
+
+
+class TestEdgeCases:
+
+    def test_empty_input(self):
+        intervals = np.array([])
+        times = np.array([])
+        clean, t_clean, mask = clean_intervals(intervals, times)
+        assert len(clean) == 0
+        assert len(t_clean) == 0
+        assert len(mask) == 0
+
+    def test_single_interval(self):
+        intervals = np.array([800.])
+        times = np.array([1.0])
+        clean, t_clean, mask = clean_intervals(intervals, times)
+        # Single value: passes range gate, no comparable median
+        assert len(clean) == 1
+        assert mask[0]
+
+    def test_mismatched_lengths_raises(self):
+        with pytest.raises(ValueError):
+            clean_intervals(np.array([800., 800.]), np.array([1.0]))
+
+    def test_invalid_karlsson_pct_raises(self):
+        with pytest.raises(ValueError):
+            clean_intervals(np.array([800.]), np.array([1.0]),
+                            karlsson_pct=1.5)
+
+
+class TestTwoPassOrder:
+
+    def test_range_gate_then_karlsson(self):
+        """Range gate must run first — a 250 ms ectopic shouldn't
+        skew the rolling median used by the Karlsson rule."""
+        # Steady 800 ms, then one 250 ms ectopic, then steady 800 ms
+        intervals = np.array([800.]*5 + [250.] + [800.]*5)
+        times = np.cumsum(intervals) / 1000.0
+        clean, t_clean, mask = clean_intervals(intervals, times)
+        # Ectopic dropped, others kept
+        assert not mask[5]
+        assert mask.sum() == 10
