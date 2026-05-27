@@ -413,3 +413,17 @@ class TestParticipantMetadata:
         assert loaded["fitzpatrick"] == 3
         assert loaded["notes"] == "n"
         assert loaded["channel_sites"]["0"] == "finger"
+
+    def test_save_metadata_channel_sites_deep_merge(
+        self, isolated_sessions_root, synth_session
+    ):
+        name, _, _ = synth_session
+        sessions.save_participant_metadata(name, {
+            "channel_sites": {"0": "finger", "1": "earlobe"},
+        })
+        sessions.save_participant_metadata(name, {
+            "channel_sites": {"1": "wrist"},  # only update ch1
+        })
+        loaded = sessions.load_participant_metadata(name)
+        assert loaded["channel_sites"]["0"] == "finger"  # preserved
+        assert loaded["channel_sites"]["1"] == "wrist"   # updated
