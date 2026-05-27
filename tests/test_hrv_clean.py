@@ -27,3 +27,31 @@ class TestRangeGate:
         clean, t_clean, mask = clean_intervals(intervals, times,
                                                range_ms=(500.0, 1000.0))
         assert list(mask) == [False, True, False]
+
+
+class TestKarlssonRule:
+
+    def test_drops_outlier_vs_local_median(self):
+        # Steady 800 ms beats with one 1500 ms outlier
+        intervals = np.array([800.]*10 + [1500.] + [800.]*10)
+        times = np.cumsum(intervals) / 1000.0
+        clean, t_clean, mask = clean_intervals(intervals, times)
+        # Outlier dropped
+        assert not mask[10]
+        # Other beats survive
+        assert mask.sum() == 20
+
+    def test_preserves_clean_60bpm_series(self):
+        rng = np.random.default_rng(42)
+        intervals = 800.0 + 25.0 * rng.standard_normal(60)
+        times = np.cumsum(intervals) / 1000.0
+        clean, t_clean, mask = clean_intervals(intervals, times)
+        # Allow at most 5% accidental drops on a clean series
+        assert mask.sum() >= 57
+
+    def test_handles_constant_perfect_series(self):
+        intervals = np.array([800.0] * 30)
+        times = np.cumsum(intervals) / 1000.0
+        clean, t_clean, mask = clean_intervals(intervals, times)
+        assert mask.all()
+        assert len(clean) == 30
