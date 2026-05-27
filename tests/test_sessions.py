@@ -369,3 +369,22 @@ class TestParticipantMetadata:
         # Explicit site preserved, others defaulted.
         assert meta["channel_sites"]["0"] == "thumb"
         assert meta["channel_sites"]["1"] == "earlobe"
+
+    def test_save_metadata_preserves_existing_notes_when_blank_payload_arrives(
+        self, isolated_sessions_root, synth_session
+    ):
+        name, _, _ = synth_session
+        # First save: notes populated
+        sessions.save_participant_metadata(name, {
+            "participant_id": "P001", "fitzpatrick": 3,
+            "notes": "sleep-deprived volunteer",
+            "channel_sites": {"0": "finger"},
+        })
+        # Second save: blank notes (simulates Start Recording with empty form)
+        sessions.save_participant_metadata(name, {
+            "participant_id": "P001", "fitzpatrick": 3,
+            "notes": "",
+            "channel_sites": {"0": "finger"},
+        })
+        loaded = sessions.load_participant_metadata(name)
+        assert loaded["notes"] == "sleep-deprived volunteer"
