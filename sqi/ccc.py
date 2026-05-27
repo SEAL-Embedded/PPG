@@ -94,6 +94,45 @@ def ppg_bandpass(sig, fs, low=0.5, high=4.0, order=4):
     return filtfilt(b, a, sig)
 
 
+# ── Rolling-window adaptive threshold helper ──────────────────────────────────
+
+def _rolling_window_threshold(sig, fs, window_s=8.0, stride_s=2.0,
+                              fn=None):
+    """Per-sample threshold from a rolling window over ``sig``.
+
+    Used by both R-peak height thresholding and PPG prominence
+    thresholding so a motion burst or amplitude drift in one section
+    cannot poison the threshold for the rest of the recording.
+
+    Parameters
+    ----------
+    sig : np.ndarray
+    fs : float
+    window_s : float -- window length in seconds (default 8 s)
+    stride_s : float -- spacing between window centres (default 2 s)
+    fn : callable -- summary statistic on each window
+                     (default ``np.percentile(x, 90) * 0.5``)
+
+    Returns
+    -------
+    threshold : np.ndarray, same length as ``sig``
+    """
+    if fn is None:
+        fn = lambda x: float(np.percentile(x, 90) * 0.5)
+    n = len(sig)
+    window = int(window_s * fs)
+    stride = int(stride_s * fs)
+    if n <= window or window <= 0 or stride <= 0:
+        return np.full(n, fn(sig))
+    centers = np.arange(window // 2, n - window // 2, stride)
+    if len(centers) == 0:
+        return np.full(n, fn(sig))
+    thresholds = np.array([
+        fn(sig[max(0, c - window // 2):c + window // 2]) for c in centers
+    ])
+    return np.interp(np.arange(n), centers, thresholds)
+
+
 # ── Peak detection ────────────────────────────────────────────────────────────
 
 def detect_r_peaks(ecg, fs):
@@ -126,8 +165,10 @@ def detect_r_peaks(ecg, fs):
     # 250 ms between beats -> 240 BPM ceiling (covers exercise + arrhythmia)
     min_distance  = int(0.25 * fs)
     # Threshold must be computed AFTER the polarity flip so it reflects the
-    # signal find_peaks actually sees.
-    height_thresh = np.percentile(filtered, 90) * 0.5   # 50% of 90th percentile
+    # signal find_peaks actually sees. Use a rolling-window adaptive threshold
+    # (8-s window, 2-s stride) so a motion burst can't poison the threshold
+    # for the rest of the recording.
+    height_thresh = _rolling_window_threshold(filtered, fs)
     peaks, _ = find_peaks(filtered, distance=min_distance, height=height_thresh)
     return peaks
 

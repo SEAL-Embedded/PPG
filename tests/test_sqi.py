@@ -50,6 +50,32 @@ class TestAutoFlipRobustness:
             f"got {len(peaks)} peaks, expected ~30 (single spike must not invert)"
 
 
+class TestAdaptiveThresholds:
+    def test_detect_r_peaks_detects_peaks_outside_motion_burst(
+        self, synth_motion_burst_ecg
+    ):
+        """Clean beats before and after a 5-s motion burst must still be detected."""
+        peaks = detect_r_peaks(synth_motion_burst_ecg["ecg"],
+                               synth_motion_burst_ecg["fs"])
+        peak_times_s = peaks / synth_motion_burst_ecg["fs"]
+        before = (peak_times_s < 11.0).sum()
+        after = (peak_times_s > 18.0).sum()
+        assert before >= 8, f"only {before} peaks before burst, expected >= 8"
+        assert after >= 8, f"only {after} peaks after burst, expected >= 8"
+
+    def test_detect_ppg_peaks_handles_amplitude_drift(
+        self, synth_amplitude_drift_ppg
+    ):
+        """PPG that doubles in amplitude at half: peaks detected on both halves."""
+        peaks = detect_ppg_peaks(synth_amplitude_drift_ppg["ppg"],
+                                  synth_amplitude_drift_ppg["fs"])
+        n = len(synth_amplitude_drift_ppg["ppg"])
+        first = (peaks < n // 2).sum()
+        second = (peaks >= n // 2).sum()
+        assert first >= 10
+        assert second >= 10
+
+
 class TestPpgAutoFlip:
     def test_detect_ppg_peaks_handles_inverted(self, synth_inverted_ppg):
         peaks = detect_ppg_peaks(synth_inverted_ppg["ppg"],
