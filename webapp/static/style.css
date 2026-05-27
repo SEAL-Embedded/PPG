@@ -1486,3 +1486,45 @@ button.mini { padding: 5px 10px; font-size: 11px; }
   color: var(--info); background: var(--info-soft);
   border-color: rgba(102, 196, 214, 0.32);
 }
+
+/* Per-HRV-feature CCC table — colour-coded background cells (distinct from
+   the text-only .grade-good / .grade-ok / .grade-bad on .sqi-table). The
+   CCC cells get a faint background tint so the green/amber/red verdict
+   pops at a glance across the 13-feature × N-site grid. */
+.sqi-table td.ccc-good { background-color: rgba(135, 212, 155, 0.18); color: var(--good); font-weight: 600; }
+.sqi-table td.ccc-ok   { background-color: rgba(232, 176, 112, 0.22); color: var(--warn); font-weight: 600; }
+.sqi-table td.ccc-bad  { background-color: rgba(239, 106, 106, 0.18); color: var(--bad);  font-weight: 600; }
+.sqi-table td.ccc-null { color: var(--ink-faint); }
+/* Small-n caveat: amber n-pill on the count cell. */
+.sqi-table td.n-small {
+  background-color: rgba(232, 176, 112, 0.22);
+  color: var(--warn);
+  font-weight: 600;
+}
+/* Insufficient-n caveat: whole row muted. */
+.sqi-table tr.row-muted td { color: var(--ink-faint); opacity: 0.7; }
+.sqi-table tr.row-muted:hover { background: transparent; }
+/* Section spacing for the per-feature CCC tables. */
+.metrics-section h4 {
+  margin: 18px 0 8px 0;
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-mute);
+}
+.metrics-section h5 {
+  margin: 14px 0 6px 0;
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink-2);
+}
+.metrics-section .pfc-blurb {
+  margin: 6px 0 10px 0;
+  color: var(--ink-mute);
+  font-size: 13px;
+  line-height: 1.55;
+}
+#per-feature-per-site-tables { display: flex; flex-direction: column; gap: 8px; }
