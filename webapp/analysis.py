@@ -234,11 +234,27 @@ def load_session_signals(name, max_points=5000, tail_seconds=None,
                 ts_ms, [sig, leads_off], t0_ms, start_s, end_s)
             ts_s = (ts_ms - t0_ms) / 1000.0
             xs, ys = _downsample(ts_s, sig, max_points)
+            # _leads_off_spans runs on the full pre-downsample ts_s,
+            # but the front-end draws those spans on the downsampled
+            # xs trace. The min/max bucket decimator can drop the
+            # first/last sample, leaving xs[0] > ts_s[0] or
+            # xs[-1] < ts_s[-1]. Clamp every span to [xs[0], xs[-1]]
+            # so the red-shaded regions stay inside the visible trace,
+            # and drop spans that collapse to zero or negative width
+            # after clamping.
+            spans = _leads_off_spans(ts_s, leads_off)
+            if len(xs):
+                x_lo, x_hi = float(xs[0]), float(xs[-1])
+                spans = [
+                    [max(s, x_lo), min(e, x_hi)]
+                    for s, e in spans
+                    if max(s, x_lo) <= min(e, x_hi)
+                ]
             ecg_payload = {
                 "name": "ecg",
                 "time_s": xs.tolist(),
                 "signal": ys.tolist(),
-                "leads_off_spans": _leads_off_spans(ts_s, leads_off),
+                "leads_off_spans": spans,
                 "fs_hz": infer_fs(ts_ms),
                 "n_samples": int(len(sig)),
             }
