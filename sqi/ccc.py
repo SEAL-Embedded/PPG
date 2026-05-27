@@ -117,8 +117,11 @@ def detect_r_peaks(ecg, fs):
     """
     filtered = bandpass(ecg, fs, low=0.5, high=40.0)
     # Auto-detect polarity: if the negative excursion dominates, the lead is inverted.
+    # Use trimmed extrema (top/bottom 0.5%) so a single huge spike or electrode
+    # pop can't flip the whole recording.
     centered = filtered - np.mean(filtered)
-    if np.abs(centered.min()) > centered.max():
+    lo, hi = np.percentile(centered, [0.5, 99.5])
+    if abs(lo) > abs(hi):
         filtered = -filtered
     # 250 ms between beats -> 240 BPM ceiling (covers exercise + arrhythmia)
     min_distance  = int(0.25 * fs)

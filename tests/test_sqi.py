@@ -38,6 +38,18 @@ class TestFilterGuards:
 
 # ── PPG bandpass at paper spec (F1) ─────────────────────────────────────────
 
+class TestAutoFlipRobustness:
+    def test_detect_r_peaks_robust_to_single_negative_spike(
+        self, synth_single_spike_ecg
+    ):
+        """One huge negative spike must NOT permanently invert the whole recording."""
+        peaks = detect_r_peaks(synth_single_spike_ecg["ecg"],
+                               synth_single_spike_ecg["fs"])
+        # 30 s at 60 BPM -> ~30 peaks. Allow +/- 5 tolerance.
+        assert 20 <= len(peaks) <= 40, \
+            f"got {len(peaks)} peaks, expected ~30 (single spike must not invert)"
+
+
 class TestFastHrCeiling:
     def test_detect_r_peaks_handles_180_bpm(self, synth_fast_hr_ecg):
         peaks = detect_r_peaks(synth_fast_hr_ecg["ecg"], synth_fast_hr_ecg["fs"])
