@@ -129,10 +129,10 @@ def detect_r_peaks(ecg, fs):
 
 def detect_ppg_peaks(ppg, fs):
     """
-    Detect systolic peaks in a lowpass-filtered PPG signal.
+    Detect systolic peaks in a bandpass-filtered PPG signal.
 
     Strategy:
-      - Lowpass filter (8 Hz) to smooth motion noise
+      - Paper-spec bandpass (0.5-4 Hz, 4th-order) via ``ppg_bandpass``
       - find_peaks with minimum distance = 0.4s
         and prominence threshold to reject small oscillations
 
@@ -145,7 +145,7 @@ def detect_ppg_peaks(ppg, fs):
     -------
     peaks : np.ndarray  -- sample indices of systolic peaks
     """
-    filtered = lowpass(ppg, fs, cutoff=8.0)
+    filtered = ppg_bandpass(ppg, fs)
     min_distance = int(0.4 * fs)
     prominence_thresh = np.std(filtered) * 0.5
     peaks, _ = find_peaks(filtered, distance=min_distance, prominence=prominence_thresh)
