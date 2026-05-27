@@ -129,10 +129,16 @@ def _sample_entropy(series, m=2, r=None):
     than m+2 points), or when the matching template counts come out zero
     (log of zero would be -inf). Pure numpy keeps us off the nolds
     dependency hop and is fast enough for ~500-beat RR series.
+
+    Per Richman & Moorman 2000 eq. (2), both phi(m) and phi(m+1) iterate
+    over the SAME N - m templates so the ratio A / B is unbiased — the
+    earlier implementation used N - m + 1 templates for phi(m) and only
+    N - m for phi(m+1), inflating B and biasing SampEn upward by a small
+    positive amount (most visible on perfectly periodic signals).
     """
     x = np.asarray(series, dtype=float)
     n = len(x)
-    if n < m + 2:
+    if n - m < 2:
         return float("nan")
     if r is None:
         r = 0.2 * float(np.std(x, ddof=1)) if n > 1 else 0.0
@@ -140,10 +146,12 @@ def _sample_entropy(series, m=2, r=None):
         return float("nan")
 
     def _phi(m_):
-        # Templates: rows of length m_ from x.
-        if n - m_ + 1 < 2:
+        # Templates: rows of length m_ from x. Both phi(m) and phi(m+1)
+        # iterate over the SAME N - m templates (Richman & Moorman 2000
+        # eq. 2) — `m` here is the outer closure variable, not `m_`.
+        if n - m < 2:
             return 0.0
-        tmpl = np.array([x[i:i + m_] for i in range(n - m_ + 1)])
+        tmpl = np.array([x[i:i + m_] for i in range(n - m)])
         # Chebyshev (max-abs) distance, exclude self-matches via -1.
         # Vectorised: for every pair of templates compute max-abs diff.
         diff = np.abs(tmpl[:, None, :] - tmpl[None, :, :]).max(axis=2)
