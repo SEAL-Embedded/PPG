@@ -94,3 +94,17 @@ class TestEdgeCases:
         with pytest.raises(ValueError):
             clean_intervals(np.array([800.]), np.array([1.0]),
                             karlsson_pct=1.5)
+
+
+class TestTwoPassOrder:
+
+    def test_range_gate_then_karlsson(self):
+        """Range gate must run first — a 250 ms ectopic shouldn't
+        skew the rolling median used by the Karlsson rule."""
+        # Steady 800 ms, then one 250 ms ectopic, then steady 800 ms
+        intervals = np.array([800.]*5 + [250.] + [800.]*5)
+        times = np.cumsum(intervals) / 1000.0
+        clean, t_clean, mask = clean_intervals(intervals, times)
+        # Ectopic dropped, others kept
+        assert not mask[5]
+        assert mask.sum() == 10
