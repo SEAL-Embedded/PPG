@@ -50,6 +50,14 @@ class TestAutoFlipRobustness:
             f"got {len(peaks)} peaks, expected ~30 (single spike must not invert)"
 
 
+class TestPpgAutoFlip:
+    def test_detect_ppg_peaks_handles_inverted(self, synth_inverted_ppg):
+        peaks = detect_ppg_peaks(synth_inverted_ppg["ppg"],
+                                  synth_inverted_ppg["fs"])
+        # Same recording, just sign-flipped -> should still get ~30 peaks
+        assert 20 <= len(peaks) <= 40
+
+
 class TestFastHrCeiling:
     def test_detect_r_peaks_handles_180_bpm(self, synth_fast_hr_ecg):
         peaks = detect_r_peaks(synth_fast_hr_ecg["ecg"], synth_fast_hr_ecg["fs"])

@@ -151,6 +151,13 @@ def detect_ppg_peaks(ppg, fs):
     peaks : np.ndarray  -- sample indices of systolic peaks
     """
     filtered = ppg_bandpass(ppg, fs)
+    # Auto-detect polarity: same trimmed-extrema test as detect_r_peaks so a
+    # device that delivers an inverted photodiode signal (or a sign flip
+    # elsewhere in the pipeline) still finds systolic peaks.
+    centered = filtered - np.mean(filtered)
+    lo, hi = np.percentile(centered, [0.5, 99.5])
+    if abs(lo) > abs(hi):
+        filtered = -filtered
     # 250 ms between beats -> 240 BPM ceiling (covers exercise + arrhythmia)
     min_distance = int(0.25 * fs)
     prominence_thresh = np.std(filtered) * 0.5
