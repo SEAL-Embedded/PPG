@@ -397,3 +397,19 @@ class TestParticipantMetadata:
         sessions.save_participant_metadata(name, {"notes": "second"})
         loaded = sessions.load_participant_metadata(name)
         assert loaded["notes"] == "second"
+
+    def test_save_metadata_preserves_keys_not_in_payload(
+        self, isolated_sessions_root, synth_session
+    ):
+        name, _, _ = synth_session
+        sessions.save_participant_metadata(name, {
+            "participant_id": "P001", "fitzpatrick": 3, "notes": "n",
+            "channel_sites": {"0": "finger", "1": "earlobe"},
+        })
+        # Partial payload — only participant_id
+        sessions.save_participant_metadata(name, {"participant_id": "P002"})
+        loaded = sessions.load_participant_metadata(name)
+        assert loaded["participant_id"] == "P002"
+        assert loaded["fitzpatrick"] == 3
+        assert loaded["notes"] == "n"
+        assert loaded["channel_sites"]["0"] == "finger"
