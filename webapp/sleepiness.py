@@ -40,6 +40,7 @@ from sqi.ccc import (
     detect_r_peaks,
     peaks_to_intervals,
 )
+from sqi.hrv_clean import clean_intervals
 
 from . import analysis, sessions
 
@@ -454,6 +455,10 @@ def _analyze_one_session(session_name, analyzed_payload, cohort_stats):
         pt_s = np.asarray(ecg_peak_times_s, dtype=float)
         rr_ms = np.diff(pt_s) * 1000.0
         rr_t_s = pt_s[1:]
+        # NN-cleaning: drop physiologically implausible intervals + Karlsson
+        # 20% local-median rule, so SDNN/RMSSD/LF/HF aren't poisoned by one
+        # missed beat (sqi/hrv_clean.py).
+        rr_ms, rr_t_s, _ = clean_intervals(rr_ms, rr_t_s)
         ecg_feats = compute_hrv_features(rr_ms, rr_t_s)
         n_rr = int(len(rr_ms))
         ecg_spi, ecg_components = compute_sleepiness_index(ecg_feats, cohort_stats)
@@ -492,6 +497,10 @@ def _analyze_one_session(session_name, analyzed_payload, cohort_stats):
                         peaks = detect_ppg_peaks(ppg_sig, fs)
                         if len(peaks) >= MIN_BEATS_FOR_HRV + 1:
                             ppi_ms, ppi_times_s = peaks_to_intervals(peaks, ppg_ts_ms)
+                            # Same NN-cleaning as ECG so PPG HRV features and
+                            # the per-feature CCC reflect physiological
+                            # fidelity, not detector-error survival.
+                            ppi_ms, ppi_times_s, _ = clean_intervals(ppi_ms, ppi_times_s)
                             ppg_feats = compute_hrv_features(ppi_ms, ppi_times_s)
                             ppi_count = int(len(ppi_ms))
                             spi_ch, comp_ch = compute_sleepiness_index(
