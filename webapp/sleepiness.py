@@ -57,10 +57,24 @@ SPI_WEIGHTS = {
 LF_BAND = (0.04, 0.15)    # Hz, Task Force 1996
 HF_BAND = (0.15, 0.40)    # Hz, Task Force 1996
 
-# Minimum number of RR/PPI intervals before HRV features are even
-# attempted — fewer than 30 beats means SDNN/RMSSD are too noisy to be
-# meaningful (Task Force 1996 suggests ~5 min of clean ECG).
-MIN_BEATS_FOR_HRV = 30
+# Tiered minimum-beat thresholds. Each HRV feature has a different
+# variance floor below which the estimate is uninterpretable, so we gate
+# them separately instead of using a single MIN_BEATS_FOR_HRV.
+#
+#   * Time-domain (SDNN, RMSSD, pNN50, Poincaré sd1/sd2): 30 beats —
+#     Task Force 1996 floor for short-term HRV.
+#   * Sample entropy: 100 beats — Richman & Moorman 2000 note the
+#     estimator's variance is large below ~100 templates.
+#   * Spectral (LF, HF, derived ratios): 150 beats — covers at least one
+#     LF cycle (~25 s @ 60 BPM) with enough beats for Lomb-Scargle.
+MIN_BEATS_TIMEDOMAIN = 30
+MIN_BEATS_SAMPEN = 100
+MIN_BEATS_SPECTRAL = 150
+
+# Backward-compat alias — the old MIN_BEATS_FOR_HRV name is still
+# referenced by other modules (analyze_session, etc.) and persists as
+# the time-domain gate value.
+MIN_BEATS_FOR_HRV = MIN_BEATS_TIMEDOMAIN
 
 # Tiny floor inside log(HFnu) so log(0) doesn't poison the SPI when a
 # segment has zero HF power.
@@ -157,7 +171,7 @@ def _lomb_scargle_band_power(rr_ms, rr_times_s, band):
     """
     rr_ms = np.asarray(rr_ms, dtype=float)
     rr_times_s = np.asarray(rr_times_s, dtype=float)
-    if len(rr_ms) < MIN_BEATS_FOR_HRV or len(rr_ms) != len(rr_times_s):
+    if len(rr_ms) < MIN_BEATS_SPECTRAL or len(rr_ms) != len(rr_times_s):
         return float("nan")
     f_lo, f_hi = band
     if f_hi <= f_lo:
@@ -192,14 +206,17 @@ def compute_hrv_features(rr_ms, rr_times_s):
     the timestamps of the *end* of each interval in seconds (as returned
     by sqi.ccc.peaks_to_intervals).
 
-    Returns a dict of all 13 features; every value is NaN when the
-    series has fewer than MIN_BEATS_FOR_HRV intervals so downstream
-    z-norm and aggregation can iterate over the same keys regardless of
-    whether the channel was usable.
+    Returns a dict of all 13 features. Each feature has a tiered minimum-
+    beat gate (see MIN_BEATS_TIMEDOMAIN / _SAMPEN / _SPECTRAL): below the
+    time-domain floor every feature is NaN; above the time-domain floor
+    but below the sample-entropy floor sampen is NaN; below the spectral
+    floor the LF/HF features are NaN (gate enforced inside
+    `_lomb_scargle_band_power`). Keys are always present so downstream
+    z-norm and aggregation can iterate without conditional logic.
     """
     rr = np.asarray(rr_ms, dtype=float)
     rr_t = np.asarray(rr_times_s, dtype=float)
-    if len(rr) < MIN_BEATS_FOR_HRV:
+    if len(rr) < MIN_BEATS_TIMEDOMAIN:
         return _nan_features()
 
     # ── Time-domain (Task Force 1996) ────────────────────────────────────
@@ -209,6 +226,8 @@ def compute_hrv_features(rr_ms, rr_times_s):
     pnn50 = float(np.mean(np.abs(diffs) > 50.0)) if len(diffs) else float("nan")
 
     # ── Frequency-domain (Lomb-Scargle, Lomb 1976) ───────────────────────
+    # The MIN_BEATS_SPECTRAL gate lives inside `_lomb_scargle_band_power`,
+    # which returns NaN for series below that threshold.
     lf_power = _lomb_scargle_band_power(rr, rr_t, LF_BAND)
     hf_power = _lomb_scargle_band_power(rr, rr_t, HF_BAND)
 
@@ -238,7 +257,12 @@ def compute_hrv_features(rr_ms, rr_times_s):
     sd1_sd2 = (sd1 / sd2) if (np.isfinite(sd1) and np.isfinite(sd2) and sd2 > 0) else float("nan")
 
     # ── Complexity ────────────────────────────────────────────────────────
-    sampen = _sample_entropy(rr, m=2, r=0.2 * sdnn if np.isfinite(sdnn) else None)
+    # Sample entropy has its own tier — Richman & Moorman 2000 note the
+    # estimator's variance is large below ~100 templates.
+    if len(rr) >= MIN_BEATS_SAMPEN:
+        sampen = _sample_entropy(rr, m=2, r=0.2 * sdnn if np.isfinite(sdnn) else None)
+    else:
+        sampen = float("nan")
 
     return {
         "sdnn_ms":     float(sdnn),
