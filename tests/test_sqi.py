@@ -76,6 +76,36 @@ class TestAdaptiveThresholds:
         assert second >= 10
 
 
+class TestAsymmetricPttWindow:
+    def test_match_intervals_rejects_negative_offset(self):
+        """ppi_time before rr_time by 100 ms -> not matched (physiologically impossible)."""
+        from sqi.ccc import match_intervals
+        rr_ms = np.array([1000.0])
+        rr_t = np.array([2.0])
+        ppi_ms = np.array([1000.0])
+        ppi_t = np.array([1.9])   # 100 ms BEFORE RR — impossible
+        mr, mp = match_intervals(rr_ms, rr_t, ppi_ms, ppi_t)
+        assert len(mr) == 0, "match accepted physiologically impossible negative offset"
+
+    def test_match_intervals_accepts_380ms_ptt(self):
+        from sqi.ccc import match_intervals
+        rr_ms = np.array([1000.0])
+        rr_t = np.array([2.0])
+        ppi_ms = np.array([1000.0])
+        ppi_t = np.array([2.38])  # 380 ms AFTER RR — within PTT range
+        mr, mp = match_intervals(rr_ms, rr_t, ppi_ms, ppi_t)
+        assert len(mr) == 1
+
+    def test_match_intervals_rejects_500ms_offset(self):
+        from sqi.ccc import match_intervals
+        rr_ms = np.array([1000.0])
+        rr_t = np.array([2.0])
+        ppi_ms = np.array([1000.0])
+        ppi_t = np.array([2.5])  # 500 ms after — outside 0.40 default
+        mr, mp = match_intervals(rr_ms, rr_t, ppi_ms, ppi_t)
+        assert len(mr) == 0
+
+
 class TestPpgAutoFlip:
     def test_detect_ppg_peaks_handles_inverted(self, synth_inverted_ppg):
         peaks = detect_ppg_peaks(synth_inverted_ppg["ppg"],

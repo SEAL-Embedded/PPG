@@ -311,6 +311,114 @@ class TestAnalyzeSleepiness:
         assert len(result["caveats"]) >= 5
 
 
+# ── Per-HRV-feature CCC aggregation (H4) ────────────────────────────────────
+
+class TestAggregatePerFeature:
+
+    def _make_per_session(self, n_sessions=5, n_channels=3, feature_offset=0.0):
+        """Build a synthetic per_session list mimicking analyze_sleepiness output."""
+        rng = np.random.default_rng(42)
+        per_session = []
+        for s_idx in range(n_sessions):
+            channels = []
+            for c_idx in range(n_channels):
+                site = ["finger", "earlobe", "wrist"][c_idx]
+                channels.append({
+                    "channel": c_idx,
+                    "site": site,
+                    "features": {
+                        "sdnn_ms":     40.0 + 5*rng.standard_normal(),
+                        "rmssd_ms":    30.0 + 5*rng.standard_normal(),
+                        "pnn50":       0.10 + 0.02*rng.standard_normal(),
+                        "lf_power":    100.0 + 20*rng.standard_normal(),
+                        "hf_power":    80.0 + 20*rng.standard_normal(),
+                        "lf_nu":       0.55 + 0.05*rng.standard_normal(),
+                        "hf_nu":       0.45 + 0.05*rng.standard_normal(),
+                        "lf_hf_ratio": 1.3 + 0.2*rng.standard_normal(),
+                        "log_lf_hf":   0.26 + 0.1*rng.standard_normal(),
+                        "sd1_ms":      20.0 + 3*rng.standard_normal(),
+                        "sd2_ms":      55.0 + 5*rng.standard_normal(),
+                        "sd1_sd2":     0.36 + 0.05*rng.standard_normal(),
+                        "sampen":      1.5 + 0.2*rng.standard_normal(),
+                    },
+                })
+            ecg_feats = {
+                "sdnn_ms":     40.0 + feature_offset + 5*rng.standard_normal(),
+                "rmssd_ms":    30.0 + 5*rng.standard_normal(),
+                "pnn50":       0.10 + 0.02*rng.standard_normal(),
+                "lf_power":    100.0 + 20*rng.standard_normal(),
+                "hf_power":    80.0 + 20*rng.standard_normal(),
+                "lf_nu":       0.55 + 0.05*rng.standard_normal(),
+                "hf_nu":       0.45 + 0.05*rng.standard_normal(),
+                "lf_hf_ratio": 1.3 + 0.2*rng.standard_normal(),
+                "log_lf_hf":   0.26 + 0.1*rng.standard_normal(),
+                "sd1_ms":      20.0 + 3*rng.standard_normal(),
+                "sd2_ms":      55.0 + 5*rng.standard_normal(),
+                "sd1_sd2":     0.36 + 0.05*rng.standard_normal(),
+                "sampen":      1.5 + 0.2*rng.standard_normal(),
+            }
+            per_session.append({
+                "session_name": f"session_test_{s_idx}",
+                "ecg": {"features": ecg_feats},
+                "channels": channels,
+            })
+        return per_session
+
+    def test_per_feature_overall_returns_all_13_features(self):
+        per_session = self._make_per_session(n_sessions=5, n_channels=3)
+        result = sleepiness._aggregate_per_feature(per_session)
+        assert "overall" in result
+        for feat in ("sdnn_ms", "rmssd_ms", "pnn50", "lf_power", "hf_power",
+                     "lf_nu", "hf_nu", "lf_hf_ratio", "log_lf_hf",
+                     "sd1_ms", "sd2_ms", "sd1_sd2", "sampen"):
+            assert feat in result["overall"], f"missing feature {feat}"
+
+    def test_per_feature_overall_n_equals_total_channel_sessions(self):
+        per_session = self._make_per_session(n_sessions=5, n_channels=3)
+        result = sleepiness._aggregate_per_feature(per_session)
+        # 5 sessions × 3 channels = 15 pairs
+        for feat, stats in result["overall"].items():
+            if stats.get("n") is not None:
+                assert stats["n"] == 15
+
+    def test_per_feature_per_site_groups_by_channel_site(self):
+        per_session = self._make_per_session(n_sessions=5, n_channels=3)
+        result = sleepiness._aggregate_per_feature(per_session)
+        assert "per_site" in result
+        for site in ("finger", "earlobe", "wrist"):
+            assert site in result["per_site"]
+            # 5 sessions × 1 channel per site = 5
+            for feat, stats in result["per_site"][site].items():
+                if stats.get("n") is not None:
+                    assert stats["n"] == 5
+
+    def test_per_feature_n_below_4_returns_null_ccc(self):
+        per_session = self._make_per_session(n_sessions=3, n_channels=1)
+        result = sleepiness._aggregate_per_feature(per_session)
+        # 3 sessions × 1 channel (finger only) = 3 pairs total < 4 → CCC null
+        for feat, stats in result["overall"].items():
+            assert stats.get("ccc") is None or not np.isfinite(stats.get("ccc", float("nan")))
+
+    def test_per_feature_small_n_caveat_flag(self):
+        per_session = self._make_per_session(n_sessions=5, n_channels=1)
+        # 5 pairs — small but >=4 → ccc present, but caveat set
+        result = sleepiness._aggregate_per_feature(per_session)
+        any_caveat = any(
+            stats.get("caveat") == "small_n"
+            for feat, stats in result["overall"].items()
+        )
+        assert any_caveat
+
+
+class TestAnalyzeSleepinessIncludesPerFeature:
+
+    def test_response_has_per_feature_key(self, synth_session_with_metadata):
+        result = sleepiness.analyze_sleepiness()
+        assert "per_feature" in result
+        assert "overall" in result["per_feature"]
+        assert "per_site" in result["per_feature"]
+
+
 # ── Persistence ─────────────────────────────────────────────────────────────
 
 class TestPersistence:

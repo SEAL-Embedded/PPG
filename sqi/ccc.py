@@ -235,17 +235,18 @@ def peaks_to_intervals(peak_indices, time_ms):
 
 # ── Interval matching ─────────────────────────────────────────────────────────
 
-def match_intervals(rr_ms, rr_times, ppi_ms, ppi_times):
+def match_intervals(rr_ms, rr_times, ppi_ms, ppi_times, max_ptt_s=0.40):
     """
-    Match RR (ECG) and PPI (PPG) intervals one-to-one by nearest timestamp.
+    Match RR (ECG) and PPI (PPG) intervals one-to-one by physiologically
+    plausible Pulse Transit Time.
 
-    Because of Pulse Transit Time (~200-300 ms), PPG peaks are delayed
-    relative to ECG R-peaks. Nearest-neighbour matching handles this
-    without requiring a fixed PTT assumption.
+    Because PPG peaks always *lag* ECG R-peaks by the PTT (typically
+    150-300 ms), the acceptance window is asymmetric:
+    ``0 <= (ppi_time - rr_time) <= max_ptt_s``. A symmetric window
+    accepts physiologically impossible negative offsets (PPG before
+    ECG) and inflates spurious matches.
 
-    The acceptance window is set to half the median RR (capped at 500 ms)
-    so that at high heart rates we can't accidentally pair across two
-    beats. Each PPI may only be claimed once.
+    Each PPI may only be claimed once.
 
     Parameters
     ----------
@@ -253,6 +254,9 @@ def match_intervals(rr_ms, rr_times, ppi_ms, ppi_times):
     rr_times : timestamps of RR intervals (seconds)
     ppi_ms   : PPI intervals in ms
     ppi_times: timestamps of PPI intervals (seconds)
+    max_ptt_s: upper bound on the PTT in seconds (default 0.40 s,
+               covers normal vascular delays plus a margin for the
+               longest peripheral sites)
 
     Returns
     -------
@@ -261,17 +265,18 @@ def match_intervals(rr_ms, rr_times, ppi_ms, ppi_times):
     if len(rr_times) == 0 or len(ppi_times) == 0:
         return np.array([]), np.array([])
 
-    median_rr_s   = float(np.median(rr_ms)) / 1000.0
-    tol_s         = min(0.5, max(0.15, median_rr_s / 2.0))
     used          = np.zeros(len(ppi_times), dtype=bool)
     matched_rr, matched_ppi = [], []
     for i, t in enumerate(rr_times):
-        # Among unused PPI timestamps, pick the closest within the tolerance.
+        # Among unused PPI timestamps, pick the closest within the asymmetric
+        # PTT window. Physiologically PPG must come AFTER ECG, so we only
+        # consider non-negative offsets here.
         candidates = np.where(~used)[0]
         if candidates.size == 0:
             break
         j = candidates[np.argmin(np.abs(ppi_times[candidates] - t))]
-        if np.abs(ppi_times[j] - t) <= tol_s:
+        offset = ppi_times[j] - t
+        if 0.0 <= offset <= max_ptt_s:
             matched_rr.append(rr_ms[i])
             matched_ppi.append(ppi_ms[j])
             used[j] = True

@@ -711,6 +711,115 @@ def _aggregate_per_fst_site(per_session):
     return out
 
 
+# ── Per-HRV-feature CCC aggregation (overall + per-site) ────────────────────
+
+# All 13 HRV features compute_hrv_features returns, in the order the
+# per-feature CCC table reports them.
+_HRV_FEATURE_KEYS = (
+    "sdnn_ms", "rmssd_ms", "pnn50",
+    "lf_power", "hf_power", "lf_nu", "hf_nu", "lf_hf_ratio", "log_lf_hf",
+    "sd1_ms", "sd2_ms", "sd1_sd2",
+    "sampen",
+)
+
+# CCC is undefined below 4 paired observations (var(x)+var(y) can collapse
+# and Bland-Altman LOA is meaningless). Between 4 and SMALL_N_THRESHOLD we
+# still report it but flag a "small_n" caveat so the frontend can grey-out
+# the row.
+_MIN_PAIRS_FOR_CCC = 4
+_SMALL_N_THRESHOLD = 10
+
+
+def _aggregate_per_feature(per_session):
+    """Per-HRV-feature CCC across (channel, session) pairs.
+
+    Returns ``{"overall": {feature: stats, ...}, "per_site": {site:
+    {feature: stats, ...}, ...}}`` where each ``stats`` dict contains
+    ``n``, ``ccc``, ``pearson_r``, ``bias``, ``loa_lower``, ``loa_upper``,
+    ``rmse``, ``mae``, and ``caveat``. Each (ECG, PPG) point is one
+    (channel × session) pair: there are up to (#channels × #sessions)
+    points overall, and (#sessions) per site if each session has one
+    channel at that site.
+
+    For n < _MIN_PAIRS_FOR_CCC the CCC stats are None and the caveat is
+    "insufficient_n"; for _MIN_PAIRS_FOR_CCC ≤ n < _SMALL_N_THRESHOLD the
+    CCC is computed but the caveat is "small_n" so the frontend can warn.
+    """
+    points_overall = {k: {"ecg": [], "ppg": []} for k in _HRV_FEATURE_KEYS}
+    points_per_site = {}  # site → {feat: {ecg: [], ppg: []}}
+
+    for s in per_session:
+        ecg_feats = (s.get("ecg") or {}).get("features") or {}
+        for ch in s.get("channels") or []:
+            site = ch.get("site") or "unassigned"
+            ppg_feats = ch.get("features") or {}
+            for k in _HRV_FEATURE_KEYS:
+                ev = ecg_feats.get(k)
+                pv = ppg_feats.get(k)
+                if ev is None or pv is None:
+                    continue
+                if not (np.isfinite(ev) and np.isfinite(pv)):
+                    continue
+                points_overall[k]["ecg"].append(float(ev))
+                points_overall[k]["ppg"].append(float(pv))
+                site_bucket = points_per_site.setdefault(
+                    site, {k2: {"ecg": [], "ppg": []} for k2 in _HRV_FEATURE_KEYS}
+                )
+                site_bucket[k]["ecg"].append(float(ev))
+                site_bucket[k]["ppg"].append(float(pv))
+
+    def _ccc_or_null(ecg_list, ppg_list):
+        n = len(ecg_list)
+        out = {
+            "n": n,
+            "ccc": None,
+            "pearson_r": None,
+            "bias": None,
+            "loa_lower": None,
+            "loa_upper": None,
+            "rmse": None,
+            "mae": None,
+            "caveat": None,
+        }
+        if n < _MIN_PAIRS_FOR_CCC:
+            out["caveat"] = "insufficient_n"
+            return out
+        try:
+            stats = compute_ccc(np.asarray(ppg_list), np.asarray(ecg_list))
+            def _safe(v):
+                return float(v) if np.isfinite(v) else None
+            out.update({
+                "ccc":       _safe(stats["ccc"]),
+                "pearson_r": _safe(stats["pearson_r"]),
+                "bias":      _safe(stats["bias"]),
+                "loa_lower": _safe(stats["loa_lower"]),
+                "loa_upper": _safe(stats["loa_upper"]),
+                "rmse":      _safe(stats["rmse"]),
+                "mae":       _safe(stats["mae"]),
+            })
+        except (ValueError, ZeroDivisionError):
+            # compute_ccc raises ValueError on len(x) != len(y) (cannot
+            # happen here) or len < 2 (covered by _MIN_PAIRS_FOR_CCC).
+            pass
+        if n < _SMALL_N_THRESHOLD:
+            out["caveat"] = "small_n"
+        return out
+
+    overall = {
+        k: _ccc_or_null(points_overall[k]["ecg"], points_overall[k]["ppg"])
+        for k in _HRV_FEATURE_KEYS
+    }
+    per_site = {
+        site: {
+            k: _ccc_or_null(points_per_site[site][k]["ecg"],
+                            points_per_site[site][k]["ppg"])
+            for k in _HRV_FEATURE_KEYS
+        }
+        for site in points_per_site
+    }
+    return {"overall": overall, "per_site": per_site}
+
+
 # ── HRV feature contribution summary (per-site mean component) ──────────────
 
 def _feature_contributions_per_site(per_session):
@@ -896,6 +1005,7 @@ def analyze_sleepiness(weighting="ssqi_zsqi", start_s=None, end_s=None):
         "per_session": per_session,
         "per_site": per_site,
         "per_fst_site": per_fst_site,
+        "per_feature": _aggregate_per_feature(per_session),
         "feature_contributions_per_site": contributions,
         "unusable_sessions": unusable,
         "scatter_points": scatter,
