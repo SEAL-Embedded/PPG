@@ -22,6 +22,20 @@ from sqi.ccc import (
 from sqi.SSQI_algorithm import Ssqi
 
 
+# ── Filter guards (P3) ──────────────────────────────────────────────────────
+
+class TestFilterGuards:
+    def test_bandpass_short_signal_returns_none(self, synth_short_signal):
+        from sqi.ccc import bandpass
+        out = bandpass(synth_short_signal, fs=200.0)
+        assert out is None or len(out) == len(synth_short_signal)
+
+    def test_lowpass_short_signal_returns_none(self, synth_short_signal):
+        from sqi.ccc import lowpass
+        out = lowpass(synth_short_signal, fs=200.0)
+        assert out is None or len(out) == len(synth_short_signal)
+
+
 # ── bandpass / lowpass shape ────────────────────────────────────────────────
 
 class TestFilters:
