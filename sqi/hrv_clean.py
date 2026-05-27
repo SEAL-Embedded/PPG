@@ -60,10 +60,36 @@ def clean_intervals(intervals_ms, times_s, range_ms=DEFAULT_RANGE_MS,
     """
     intervals = np.asarray(intervals_ms, dtype=float)
     times = np.asarray(times_s, dtype=float)
+    n = len(intervals)
 
     # Pass 1: physiological range gate
     low, high = range_ms
     in_range = (intervals >= low) & (intervals <= high)
 
-    mask = in_range
+    # Pass 2: Karlsson rule — rolling median over ``window`` neighbours.
+    # Compute the median only over intervals that passed pass 1 so a
+    # 250 ms ectopic cannot contaminate the reference median used to
+    # judge its neighbours.
+    keep_karlsson = np.ones(n, dtype=bool)
+    if n > 1:
+        idx_in_range = np.where(in_range)[0]
+        if len(idx_in_range) > 0:
+            valid_intervals = intervals[idx_in_range]
+            half = max(1, window // 2)
+            for i_local, i_global in enumerate(idx_in_range):
+                lo = max(0, i_local - half)
+                hi = min(len(valid_intervals), i_local + half + 1)
+                neighbours = np.concatenate([
+                    valid_intervals[lo:i_local],
+                    valid_intervals[i_local + 1:hi],
+                ])
+                if len(neighbours) == 0:
+                    continue
+                med = float(np.median(neighbours))
+                if med == 0:
+                    continue
+                if abs(intervals[i_global] - med) / med > karlsson_pct:
+                    keep_karlsson[i_global] = False
+
+    mask = in_range & keep_karlsson
     return intervals[mask].copy(), times[mask].copy(), mask
