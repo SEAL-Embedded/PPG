@@ -112,7 +112,8 @@ def load_ecg(path):
     sig = pd.to_numeric(df["sample"], errors="coerce").to_numpy(dtype=float)
     leads_off = pd.to_numeric(df["leads_off"], errors="coerce").to_numpy(dtype=float)
     valid = ~(np.isnan(ts_us) | np.isnan(sig))
-    return ts_us[valid] / 1000.0, sig[valid], leads_off[valid].astype(int)
+    ts_us_unwrapped = _unwrap_ticks_us(ts_us[valid])
+    return ts_us_unwrapped / 1000.0, sig[valid], leads_off[valid].astype(int)
 
 
 def ppg_bandpass(sig, fs, lowcut=0.6, highcut=3.3, order=2):
