@@ -1,0 +1,30 @@
+# SEAL PPG — Python dependencies
+# Install:  pip install -r requirements.txt
+
+# Dashboard / web app
+fastapi
+uvicorn
+pydantic
+httpx                # required by fastapi.testclient.TestClient
+
+# Serial receiver
+pyserial
+
+# Numerics / analysis pipeline
+numpy
+pandas
+scipy
+pingouin             # ICC (sqi/ICC.py)
+
+# Plotting (signal_visualization/, sqi/bland_altman.py)
+matplotlib
+
+# Tests
+pytest
+
+# --- Optional: legacy HRV scripts only ---
+# `pyhrv` is only imported by signal_visualization/ppgvis.py (legacy). It pulls
+# in `spectrum`, which needs a C/Fortran toolchain on Windows and often fails
+# to build. The dashboard does NOT need it. If you want the legacy HRV scripts,
+# install Microsoft C++ Build Tools first, then:
+#     pip install pyhrv
