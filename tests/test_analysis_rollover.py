@@ -39,3 +39,10 @@ class TestUnwrapTicksUs:
         diffs = np.diff(ts_ms)
         assert (diffs > 0).all(), \
             f"ts_ms has backward steps after unwrap: {diffs[diffs <= 0]}"
+
+    def test_load_ecg_unwraps_30bit_wrap(self, tmp_path):
+        p = tmp_path / "ecg_data.csv"
+        _make_wrap_csv(str(p), n_before=10, n_after=10, n_cols=3)
+        ts_ms, sig, leads_off = analysis.load_ecg(str(p))
+        diffs = np.diff(ts_ms)
+        assert (diffs > 0).all()
