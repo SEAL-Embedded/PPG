@@ -55,3 +55,14 @@ class TestKarlssonRule:
         clean, t_clean, mask = clean_intervals(intervals, times)
         assert mask.all()
         assert len(clean) == 30
+
+
+class TestAlignment:
+
+    def test_times_aligned_with_intervals(self):
+        intervals = np.array([800., 250., 800., 800.])
+        times = np.array([1.0, 1.25, 2.05, 2.85])
+        clean, t_clean, mask = clean_intervals(intervals, times)
+        # Times of kept intervals
+        np.testing.assert_array_equal(t_clean, times[mask])
+        assert len(t_clean) == len(clean)
