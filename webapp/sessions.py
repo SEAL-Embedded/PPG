@@ -22,8 +22,15 @@ import shutil
 from datetime import datetime
 
 SESSION_PATTERN = re.compile(r"^session_(\d{8})_(\d{6})$")
+BATCH_PATTERN = re.compile(r"^batch_\d{8}_\d{6}$")
+SLEEPINESS_PATTERN = re.compile(r"^run_\d{8}_\d{6}$")
 PARTICIPANT_FILENAME = "participant.json"
+HISTORY_FILENAME = "history.jsonl"
+ANALYSIS_FILENAME = "analysis.json"
+RECEIVER_LOG_FILENAME = "receiver.log"
 SESSIONS_SUBDIR = "MDPIdata"
+BATCH_SUBDIR = "batch_analyses"
+SLEEPINESS_SUBDIR = "sleepiness_runs"
 
 # Fixed mux-lane → body-site wiring, identical across every session on
 # this rig. Used as the fallback whenever a session's participant.json
@@ -105,6 +112,14 @@ def summarize_session(name, lightweight=False):
     started_at = parse_timestamp_from_name(name)
     duration_s = None if lightweight else estimate_duration(full)
 
+    # Persistence-layer additions: every session row should expose enough
+    # state that the dashboard can render "analysed N times, last on …"
+    # without a follow-up fetch per row. Each helper swallows I/O errors
+    # so one corrupt file in one session never 500s the whole list.
+    last_analyzed_at = _read_analysis_timestamp(name)
+    history_count, analysis_count = _summarize_history_counts(name)
+    has_receiver_log = os.path.isfile(os.path.join(full, RECEIVER_LOG_FILENAME))
+
     return {
         "name": name,
         "path": full,
@@ -113,6 +128,10 @@ def summarize_session(name, lightweight=False):
         "has_ecg": has_ecg,
         "channels": channels,
         "participant": participant,
+        "last_analyzed_at": last_analyzed_at,
+        "analysis_count": analysis_count,
+        "has_receiver_log": has_receiver_log,
+        "history_count": history_count,
     }
 
 
@@ -189,3 +208,376 @@ def delete_session(name):
     if not os.path.isdir(full):
         raise FileNotFoundError(name)
     shutil.rmtree(full)
+
+
+# ── Persistence layer ───────────────────────────────────────────────────────
+#
+# Everything below this line writes durable per-session artefacts inside
+# MDPIdata/session_<ts>/ (and the global MDPIdata/batch_analyses/ folder)
+# so a recording, its metadata edits, and every analysis run survive a
+# webapp restart. Every helper is wrapped in try/except + warning print:
+# a broken file must never raise into the FastAPI handler.
+
+def _utc_now_iso():
+    """Single source of truth for timestamps written by the persistence
+    layer. Suffix Z so consumers don't mistake the value for naive local
+    time."""
+    return datetime.utcnow().isoformat() + "Z"
+
+
+def batch_analyses_root():
+    """Folder that holds the saved batch snapshots. Created on demand so
+    the first /api/analyze_all call works on a fresh checkout."""
+    root = os.path.join(sessions_root(), BATCH_SUBDIR)
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _history_path(name):
+    return os.path.join(session_path(name), HISTORY_FILENAME)
+
+
+def _analysis_path(name):
+    return os.path.join(session_path(name), ANALYSIS_FILENAME)
+
+
+def _receiver_log_path(name):
+    return os.path.join(session_path(name), RECEIVER_LOG_FILENAME)
+
+
+def _coerce_jsonable(obj):
+    """Strip NaN/Inf out of a JSON tree so the file we write is parseable
+    by strict JSON consumers (the spec compact event summary holds CCC /
+    ICC values which can legitimately be float('nan'))."""
+    import math
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _coerce_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_coerce_jsonable(v) for v in obj]
+    return obj
+
+
+def append_history(name, event, data):
+    """Append one event to the session's history.jsonl. Tolerant of
+    every realistic failure mode: missing folder, locked file, NaN
+    floats in ``data``. Returns True on success, False otherwise."""
+    try:
+        full = session_path(name)
+        os.makedirs(full, exist_ok=True)
+        record = {
+            "ts": _utc_now_iso(),
+            "event": str(event),
+            "data": _coerce_jsonable(data) if data is not None else {},
+        }
+        line = json.dumps(record, separators=(",", ":")) + "\n"
+        with open(_history_path(name), "a", encoding="utf-8") as f:
+            f.write(line)
+        return True
+    except (IOError, OSError, ValueError, TypeError) as e:
+        print(f"[sessions] append_history({name}, {event}) failed: {e}")
+        return False
+
+
+def read_history(name, limit=500):
+    """Return up to ``limit`` parsed events from history.jsonl, newest
+    first. Skips lines that don't parse so one corrupt write doesn't
+    break the response. Empty list when the file is absent."""
+    path = _history_path(name)
+    if not os.path.isfile(path):
+        return []
+    out = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    out.append(json.loads(raw))
+                except json.JSONDecodeError:
+                    continue
+    except (IOError, OSError) as e:
+        print(f"[sessions] read_history({name}) failed: {e}")
+        return []
+    out.reverse()
+    if limit and limit > 0:
+        out = out[: int(limit)]
+    return out
+
+
+def save_session_analysis(name, result, crop_window):
+    """Write analysis.json for one session. The endpoint hands us the
+    raw `analyze_session` result plus the crop window — we add the
+    `analyzed_at` timestamp and the `crop_window` block itself here so
+    the on-disk file is fully self-describing without forcing the
+    analysis module to know about persistence concerns."""
+    try:
+        full = session_path(name)
+        os.makedirs(full, exist_ok=True)
+        payload = dict(result or {})
+        payload["analyzed_at"] = _utc_now_iso()
+        payload["crop_window"] = {
+            "start_s": (None if crop_window is None else crop_window.get("start_s")),
+            "end_s":   (None if crop_window is None else crop_window.get("end_s")),
+        }
+        with open(_analysis_path(name), "w", encoding="utf-8") as f:
+            json.dump(_coerce_jsonable(payload), f, indent=2)
+        return True
+    except (IOError, OSError, ValueError, TypeError) as e:
+        print(f"[sessions] save_session_analysis({name}) failed: {e}")
+        return False
+
+
+def load_session_analysis(name):
+    """Return the cached analysis.json payload, or None if absent /
+    unparseable. Used by GET /api/sessions/{name}/analysis."""
+    path = _analysis_path(name)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (IOError, OSError, json.JSONDecodeError) as e:
+        print(f"[sessions] load_session_analysis({name}) failed: {e}")
+        return None
+
+
+def save_receiver_log(name, text):
+    """Persist the recorder subprocess's captured stdout/stderr to
+    receiver.log in the session folder. Called from Recorder.stop() and
+    from Recorder.status() when an unattended subprocess exit is
+    detected."""
+    try:
+        full = session_path(name)
+        os.makedirs(full, exist_ok=True)
+        with open(_receiver_log_path(name), "w", encoding="utf-8", newline="") as f:
+            f.write(text if text is not None else "")
+        return True
+    except (IOError, OSError, TypeError) as e:
+        print(f"[sessions] save_receiver_log({name}) failed: {e}")
+        return False
+
+
+def tail_receiver_log(name, n=500):
+    """Return the last ``n`` lines of receiver.log as a single string,
+    or "" if the file doesn't exist / can't be read."""
+    path = _receiver_log_path(name)
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except (IOError, OSError) as e:
+        print(f"[sessions] tail_receiver_log({name}) failed: {e}")
+        return ""
+    if n and n > 0:
+        lines = lines[-int(n):]
+    return "".join(lines)
+
+
+def _read_analysis_timestamp(name):
+    """Lightweight: cheap-to-call helper used by summarize_session. Pulls
+    only the `analyzed_at` field rather than the full result blob."""
+    path = _analysis_path(name)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        ts = payload.get("analyzed_at") if isinstance(payload, dict) else None
+        return ts if isinstance(ts, str) else None
+    except (IOError, OSError, json.JSONDecodeError):
+        return None
+
+
+def _summarize_history_counts(name):
+    """Return (total_events, analysis_run_events) by streaming the file —
+    avoids json.loads on each line for what's basically a row-count."""
+    path = _history_path(name)
+    if not os.path.isfile(path):
+        return 0, 0
+    total = 0
+    analyses = 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                total += 1
+                if '"event":"analysis_run"' in line:
+                    analyses += 1
+    except (IOError, OSError):
+        return 0, 0
+    return total, analyses
+
+
+# ── Batch analysis archive ──────────────────────────────────────────────────
+
+def save_batch_analysis(payload):
+    """Persist a /api/analyze_all snapshot under MDPIdata/batch_analyses/
+    as batch_<YYYYMMDD_HHMMSS>.json. Mutates ``payload`` by adding
+    ``batch_id`` and ``created_at`` so the returned object and the
+    on-disk one stay identical."""
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    batch_id = f"batch_{stamp}"
+    payload = dict(payload or {})
+    payload["batch_id"] = batch_id
+    payload["created_at"] = _utc_now_iso()
+    try:
+        path = os.path.join(batch_analyses_root(), f"{batch_id}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(_coerce_jsonable(payload), f, indent=2)
+    except (IOError, OSError, TypeError) as e:
+        print(f"[sessions] save_batch_analysis({batch_id}) failed: {e}")
+    return payload
+
+
+def list_batch_analyses():
+    """List saved batch snapshots, newest first. Returns shallow
+    `{batch_id, created_at, n_sessions_analyzed, crop_window}` rows,
+    not the full payloads (those go through load_batch_analysis)."""
+    root = batch_analyses_root()
+    out = []
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return out
+    for entry in entries:
+        if not entry.endswith(".json"):
+            continue
+        stem = entry[:-5]
+        if not BATCH_PATTERN.match(stem):
+            continue
+        full = os.path.join(root, entry)
+        try:
+            with open(full, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (IOError, OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        out.append({
+            "batch_id": payload.get("batch_id", stem),
+            "created_at": payload.get("created_at"),
+            "n_sessions_analyzed": payload.get("n_sessions_analyzed", 0),
+            "crop_window": payload.get("crop_window") or {"start_s": None, "end_s": None},
+        })
+    out.sort(key=lambda r: r.get("batch_id") or "", reverse=True)
+    return out
+
+
+def load_batch_analysis(batch_id):
+    """Load one saved batch snapshot by id. Returns None if the id is
+    malformed, points outside the archive folder, or the file can't be
+    read."""
+    if not BATCH_PATTERN.match(batch_id or ""):
+        return None
+    root = os.path.abspath(batch_analyses_root())
+    full = os.path.abspath(os.path.join(root, f"{batch_id}.json"))
+    # Defensive: same path-confinement check delete_session uses.
+    if os.path.dirname(full) != root:
+        return None
+    if not os.path.isfile(full):
+        return None
+    try:
+        with open(full, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (IOError, OSError, json.JSONDecodeError) as e:
+        print(f"[sessions] load_batch_analysis({batch_id}) failed: {e}")
+        return None
+
+
+# ── Sleepiness-run archive ──────────────────────────────────────────────────
+
+def sleepiness_runs_root():
+    """Folder that holds the saved sleepiness-SPI runs. Created on demand
+    so the first /api/sleepiness_summary call works on a fresh checkout."""
+    root = os.path.join(sessions_root(), SLEEPINESS_SUBDIR)
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def save_sleepiness_run(payload):
+    """Persist a /api/sleepiness_summary snapshot under
+    MDPIdata/sleepiness_runs/ as run_<YYYYMMDD_HHMMSS>.json. Mutates
+    ``payload`` with ``run_id`` and ``created_at`` so the returned and
+    on-disk objects stay identical."""
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    run_id = f"run_{stamp}"
+    payload = dict(payload or {})
+    payload["run_id"] = run_id
+    payload["created_at"] = _utc_now_iso()
+    try:
+        path = os.path.join(sleepiness_runs_root(), f"{run_id}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(_coerce_jsonable(payload), f, indent=2)
+    except (IOError, OSError, TypeError) as e:
+        print(f"[sessions] save_sleepiness_run({run_id}) failed: {e}")
+    return payload
+
+
+def list_sleepiness_runs():
+    """List saved sleepiness runs, newest first. Returns shallow rows
+    `{run_id, created_at, n_sessions, weighting}` — full payloads go
+    through load_sleepiness_run / load_latest_sleepiness_run."""
+    root = sleepiness_runs_root()
+    out = []
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return out
+    for entry in entries:
+        if not entry.endswith(".json"):
+            continue
+        stem = entry[:-5]
+        if not SLEEPINESS_PATTERN.match(stem):
+            continue
+        full = os.path.join(root, entry)
+        try:
+            with open(full, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (IOError, OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        out.append({
+            "run_id": payload.get("run_id", stem),
+            "created_at": payload.get("created_at"),
+            "n_sessions": payload.get("n_sessions_usable", 0),
+            "weighting": payload.get("weighting", "ssqi_zsqi"),
+        })
+    out.sort(key=lambda r: r.get("run_id") or "", reverse=True)
+    return out
+
+
+def load_sleepiness_run(run_id):
+    """Load one saved sleepiness run by id. Returns None if the id is
+    malformed, points outside the archive folder, or the file can't be
+    read."""
+    if not SLEEPINESS_PATTERN.match(run_id or ""):
+        return None
+    root = os.path.abspath(sleepiness_runs_root())
+    full = os.path.abspath(os.path.join(root, f"{run_id}.json"))
+    # Defensive: same path-confinement check delete_session uses.
+    if os.path.dirname(full) != root:
+        return None
+    if not os.path.isfile(full):
+        return None
+    try:
+        with open(full, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (IOError, OSError, json.JSONDecodeError) as e:
+        print(f"[sessions] load_sleepiness_run({run_id}) failed: {e}")
+        return None
+
+
+def load_latest_sleepiness_run():
+    """Convenience: return the newest saved run, or None when none exist."""
+    runs = list_sleepiness_runs()
+    if not runs:
+        return None
+    return load_sleepiness_run(runs[0]["run_id"])

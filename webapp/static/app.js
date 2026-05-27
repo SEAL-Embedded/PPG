@@ -48,10 +48,19 @@ const state = {
   analysis: null,            // last /analyze response for selectedSession
   signals: null,
   sessions: [],
+  batch: null,               // last /api/analyze_all response (every-session view)
+  batchSource: null,         // "fresh" | {batch_id, created_at} when loaded from archive
+  batchArchives: [],         // list of {batch_id, created_at, n_sessions_analyzed, crop_window}
+  history: null,             // last /api/sessions/{name}/history response
+  historyOpen: false,        // is the run-history list expanded
   pollTimer: null,
   channelSites: loadSiteMap(),
   bpChannels: new Set(),     // PPG channels currently showing the 0.6-3.3 Hz bandpass
   window: { start: null, end: null },  // pre-processing crop, seconds since session t0
+  batchSiteSort: { col: null, dir: 1 },  // sortable per-site table state
+  modalStack: [],            // active modal ids (for Escape handler)
+  sleepiness: null,          // last /api/sleepiness_summary response
+  sleepinessSource: null,    // "fresh" | "cached" when loaded from latest archive
 };
 
 // ── DOM helpers ──────────────────────────────────────────────────────────────
@@ -63,6 +72,7 @@ window.addEventListener("DOMContentLoaded", () => {
   refreshSessions().then(() => {
     if (state.sessions.length) selectSession(state.sessions[0].name);
   });
+  refreshBatchArchives();
   pollStatus();
   restoreSidebarState();
 
@@ -72,6 +82,10 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btn-analyze").onclick  = () => runAnalysis(true);
   $("btn-reload-signals").onclick = () => loadSignals(state.selectedSession);
   $("btn-save-meta").onclick = saveMetadata;
+  $("btn-analyze-all").onclick = () => runBatchAnalysis(true);
+  $("btn-batch-rerun").onclick = () => runBatchAnalysis(true);
+  $("btn-batch-close").onclick = closeBatchView;
+  $("btn-batch-export").onclick = exportBatchCSV;
   $("btn-bp-all").onclick = toggleAllBandpass;
   $("btn-win-apply").onclick = applyWindow;
   $("btn-win-full").onclick  = clearWindow;
@@ -86,14 +100,74 @@ window.addEventListener("DOMContentLoaded", () => {
   $("delete-confirm-select").onchange = (e) => {
     setEnabled("delete-confirm", e.target.value === "delete");
   };
-  $("delete-modal").addEventListener("click", (e) => {
-    if (e.target.id === "delete-modal") closeDeleteModal();  // click backdrop to cancel
-  });
   $("session-filter").oninput = renderSessionList;
   document.querySelectorAll(".col-toggle").forEach(btn => {
     btn.addEventListener("click", () => toggleSidebar(parseInt(btn.dataset.col, 10)));
   });
+
+  // Receiver-log modal
+  $("btn-receiver-log").onclick = openReceiverLog;
+  $("recv-log-close").onclick = () => closeModal("recv-log-modal");
+  $("recv-log-refresh").onclick = refreshReceiverLog;
+
+  // Batch-archive modal
+  $("btn-browse-archive").onclick = openArchiveModal;
+  $("batch-archive-close").onclick = () => closeModal("batch-archive-modal");
+
+  // Run-history controls
+  $("btn-history-toggle").onclick = toggleHistory;
+  $("btn-history-reload").onclick = () => loadHistory(state.selectedSession, true);
+
+  // Cohort sleepiness summary (Σ button in header)
+  $("btn-sleepiness").onclick = () => runSleepinessSummary({prefer_cached: true});
+  $("btn-slp-rerun").onclick = () => runSleepinessSummary({prefer_cached: false});
+  $("btn-slp-close").onclick = closeSleepinessView;
+  $("btn-slp-export").onclick = exportSleepinessCSV;
+
+  // Onboarding
+  $("btn-help").onclick = () => openOnboarding(true);
+  $("onb-next").onclick = onbNext;
+  $("onb-back").onclick = onbBack;
+  $("onb-skip-cb").onchange = (e) => {
+    try { localStorage.setItem("seal_ppg_onboarded", e.target.checked ? "1" : ""); }
+    catch {}
+  };
+
+  // Wire all modals with backdrop-click + Escape via the central helper.
+  ["delete-modal", "recv-log-modal", "batch-archive-modal", "onb-modal"].forEach(wireModal);
+  document.addEventListener("keydown", onGlobalKeydown);
+
+  // First-launch onboarding
+  if (!localStorage.getItem("seal_ppg_onboarded")) {
+    setTimeout(() => openOnboarding(false), 500);
+  }
 });
+
+// Generic modal helpers — every new modal goes through these so the Escape
+// stack stays well-defined and backdrop clicks work uniformly.
+function wireModal(id) {
+  const el = $(id);
+  if (!el) return;
+  el.addEventListener("click", (e) => {
+    if (e.target.id === id) closeModal(id);  // backdrop click
+  });
+}
+function openModal(id) {
+  $(id)?.classList.remove("hidden");
+  if (!state.modalStack.includes(id)) state.modalStack.push(id);
+}
+function closeModal(id) {
+  $(id)?.classList.add("hidden");
+  state.modalStack = state.modalStack.filter(x => x !== id);
+  // delete-modal has its own internal reset semantics handled in
+  // closeDeleteModal — but keep the simple cases consistent.
+}
+function onGlobalKeydown(e) {
+  if (e.key === "Escape" && state.modalStack.length) {
+    const top = state.modalStack[state.modalStack.length - 1];
+    closeModal(top);
+  }
+}
 
 function toggleSidebar(n) {
   const main = $("main");
@@ -277,16 +351,49 @@ function renderSessionList() {
       ...(s.has_ecg ? ['<span class="ch ecg">ecg</span>'] : []),
       ...(s.channels || []).map(c => `<span class="ch">ch${c}</span>`),
     ];
+
+    // Persistence badges: small chips that distinguish (a) analyzed
+    // sessions from (b) sessions with only a history log from (c)
+    // untouched sessions, plus an analysis-count chip on heavy-use rows.
+    const isActive = s.name === state.selectedSession;
+    const analyzedAgo = s.last_analyzed_at ? relTimeAgo(s.last_analyzed_at) : null;
+    const badges = [];
+    if (analyzedAgo) badges.push(`<span class="badge analyzed" title="Last analysis ${s.last_analyzed_at}">analysed ${analyzedAgo}</span>`);
+    if ((s.analysis_count || 0) > 1) badges.push(`<span class="badge count" title="Total analysis runs">×${s.analysis_count}</span>`);
+    if (!s.last_analyzed_at && (s.history_count || 0) > 0) {
+      badges.push(`<span class="badge log-only" title="History events present but no cached analysis">log only</span>`);
+    }
+    const analyzedDot = analyzedAgo ? '<span class="analyzed-dot" aria-label="analyzed"></span>' : "";
+
     li.innerHTML = `
       <div class="row1">
-        <span class="pid${pid ? "" : " empty"}">${pid || "unassigned"}</span>
+        <span class="pid${pid ? "" : " empty"}">${analyzedDot}${pid || "unassigned"}</span>
         ${fst ? `<span class="fst">FST ${"I II III IV V VI".split(" ")[fst-1]}</span>` : ""}
       </div>
       <span class="ts">${ts}</span>
-      <div class="channels">${channelTags.length ? channelTags.join("") : '<span class="none">no signals</span>'}</div>`;
+      <div class="channels">${channelTags.length ? channelTags.join("") : '<span class="none">no signals</span>'}</div>
+      ${badges.length ? `<div class="badges">${badges.join("")}</div>` : ""}`;
+    li.tabIndex = 0;
     li.onclick = () => selectSession(s.name);
+    li.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectSession(s.name); } };
+    // Avoid double-active highlight when state.selectedSession === s.name
+    // and the card is also focus-visible. CSS handles both via existing rule.
+    if (isActive) { /* class already applied above */ }
     ul.appendChild(li);
   });
+}
+
+// Lightweight ISO-timestamp -> "5m ago" / "3h ago" / "2d ago" helper.
+function relTimeAgo(iso) {
+  if (!iso) return null;
+  const ms = Date.now() - Date.parse(iso);
+  if (!isFinite(ms) || ms < 0) return null;
+  const s = Math.floor(ms / 1000);
+  if (s < 60)    return s + "s ago";
+  if (s < 3600)  return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  if (s < 86400 * 14) return Math.floor(s / 86400) + "d ago";
+  return Math.floor(s / 86400) + "d ago";
 }
 
 
@@ -298,8 +405,11 @@ async function selectSession(name, opts = {}) {
   state.selectedSession = name;
   state.analysis = null;
   state.signals = null;
+  state.history = null;
   renderSessionList();
   $("no-session").classList.add("hidden");
+  $("batch").classList.add("hidden");        // batch and per-session views are mutually exclusive
+  $("sleepiness").classList.add("hidden");   // sleepiness view also mutually exclusive
   $("detail").classList.remove("hidden");
   $("detail-title").innerHTML = formatSessionTitle(name);
   setChip("→ " + name);
@@ -308,11 +418,34 @@ async function selectSession(name, opts = {}) {
   setEnabled("btn-save-meta", true);
   syncWindowInputs();   // window persists across sessions; show it
 
+  // Reset the per-session interpretation + history UI for the new session.
+  $("session-interp-block").classList.add("hidden");
+  $("history-list").classList.add("hidden");
+  $("history-list").innerHTML = "";
+  $("btn-history-toggle").textContent = "▸ Show history";
+  $("btn-history-toggle").setAttribute("aria-expanded", "false");
+  state.historyOpen = false;
+
   try {
     const s = await fetch(`/api/sessions/${name}`).then(r => r.json());
     state.sessionDetail = s;
     renderMeta(s);
     populateMetadataForm(s.participant);
+    // Receiver log only meaningful when the file actually exists on disk.
+    setEnabled("btn-receiver-log", !!s.has_receiver_log);
+    $("btn-receiver-log").title = s.has_receiver_log
+      ? "View the captured receiver subprocess log"
+      : "No receiver.log captured for this session (older recording, or capture failed)";
+    // Lazy history summary line — count from the meta payload; full list
+    // streams in when the user toggles the panel open.
+    const histCount = s.history_count || 0;
+    $("history-summary").textContent = histCount
+      ? `${histCount} event${histCount === 1 ? "" : "s"} on disk`
+      : "no events recorded";
+    $("btn-history-toggle").textContent = histCount
+      ? `▸ Show history (${histCount})`
+      : "▸ Show history";
+    setEnabled("btn-history-toggle", histCount > 0);
   } catch (e) { console.error(e); }
 
   if (opts.liveMode) {
@@ -437,6 +570,7 @@ function syncWindowInputs() {
 function renderEverything() {
   renderECGBlock();
   renderPPGBlock();
+  renderSessionInterpretation();
   renderSQITable();
   renderBlandAltmanGrid();
 }
@@ -658,14 +792,16 @@ function renderSQITable() {
   const goodCount = (r.results || []).filter(x => x.stats && x.stats.ccc > 0.95).length;
   $("sqi-summary").textContent = `${(r.results || []).length} channels  ·  ${goodCount} ≥ 0.95 CCC`;
 
+  // 12 columns total: ZSQI μ/σ and RMSE/MAE are paired into single cells
+  // so the table fits the main column without horizontal scrolling.
   let html = `<thead><tr>
     <th>Channel</th><th>Site</th>
     <th>fs (Hz)</th><th>SSQI</th>
-    <th>ZSQI μ</th><th>ZSQI σ</th>
+    <th>ZSQI μ ± σ</th>
     <th>Matched</th>
-    <th>CCC</th><th>Pearson</th>
+    <th>CCC</th><th>ICC</th><th>Pearson</th>
     <th>Bias (ms)</th><th>LOA± (ms)</th>
-    <th>RMSE</th><th>MAE</th>
+    <th>RMSE / MAE</th>
   </tr></thead><tbody>`;
 
   // ECG reference row at top — it's the agreement denominator
@@ -676,30 +812,30 @@ function renderSQITable() {
       <td class="site">Einthoven</td>
       <td>${fmt(e.fs_hz, 1)}</td>
       <td colspan="3" class="muted">${e.n_peaks} R-peaks · HR ${fmt(e.mean_hr_bpm, 0)} bpm · ${e.leads_off_samples} leads-off</td>
-      <td colspan="7" class="muted">—</td>
+      <td colspan="6" class="muted">—</td>
     </tr>`;
   }
 
   (r.results || []).forEach(row => {
     const s = row.stats;
     const cccCls = s ? gradeCCC(s.ccc) : "";
+    const iccCls = s ? gradeCCC(s.icc) : "";
     html += `<tr>
       <td class="ch-name">ch${row.channel}</td>
       <td class="site">${row.site || "—"}</td>
       <td>${fmt(row.ppg_fs_hz, 1)}</td>
       <td>${fmt(row.ssqi, 3)}</td>
-      <td>${fmt(row.zsqi_mean, 3)}</td>
-      <td>${fmt(row.zsqi_std, 3)}</td>
+      <td>${fmt(row.zsqi_mean, 3)} ± ${fmt(row.zsqi_std, 3)}</td>
       <td>${row.n_matched_beats}</td>
-      <td class="${cccCls}">${s ? fmt(s.ccc, 4) : "—"}</td>
-      <td>${s ? fmt(s.pearson_r, 4) : "—"}</td>
+      <td class="${cccCls}">${s ? fmt(s.ccc, 3) : "—"}</td>
+      <td class="${iccCls}">${s ? fmt(s.icc, 3) : "—"}</td>
+      <td>${s ? fmt(s.pearson_r, 3) : "—"}</td>
       <td>${s ? fmtSigned(s.bias_ms, 1) : "—"}</td>
       <td>${s ? fmtSigned(s.loa_lower_ms, 0) + " / " + fmtSigned(s.loa_upper_ms, 0) : "—"}</td>
-      <td>${s ? fmt(s.rmse_ms, 1) : "—"}</td>
-      <td>${s ? fmt(s.mae_ms, 1) : "—"}</td>
+      <td>${s ? fmt(s.rmse_ms, 1) + " / " + fmt(s.mae_ms, 1) : "—"}</td>
     </tr>`;
     if (row.error) {
-      html += `<tr class="err-row"><td colspan="13">⚠ ${row.error}</td></tr>`;
+      html += `<tr class="err-row"><td colspan="12">⚠ ${row.error}</td></tr>`;
     }
   });
 
@@ -862,11 +998,11 @@ function openDeleteModal() {
   // Reset the confirm gesture each time the modal opens.
   $("delete-confirm-select").value = "";
   setEnabled("delete-confirm", false);
-  $("delete-modal").classList.remove("hidden");
+  openModal("delete-modal");
 }
 
 function closeDeleteModal() {
-  $("delete-modal").classList.add("hidden");
+  closeModal("delete-modal");
 }
 
 async function performDelete() {
@@ -1036,4 +1172,1176 @@ function flash(msg, ttl = 2400) {
   bar.textContent = msg;
   bar.style.opacity = "1";
   setTimeout(() => { bar.style.opacity = "0"; }, ttl);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BATCH (every-session) ANALYSIS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// Run analyze_all_sessions on the backend, swap the detail column into
+// the batch view, render the per-site aggregate and per-session detail
+// tables. The same crop window (Window controls in the detail header)
+// is reused for every session — keeps numbers comparable to whatever
+// single-session window the user was last looking at.
+async function runBatchAnalysis(showBusy) {
+  if (showBusy) {
+    $("batch-status").textContent = "running…";
+    setStatus("analyzing", "analyzing");
+  }
+  // Reveal the batch panel and tear down the per-session detail so the
+  // two layouts don't fight for the main column.
+  $("no-session").classList.add("hidden");
+  $("detail").classList.add("hidden");
+  $("sleepiness").classList.add("hidden");
+  $("batch").classList.remove("hidden");
+  setChip("→ batch · MDPIdata");
+
+  let payload;
+  try {
+    const r = await fetch(`/api/analyze_all?${windowQS().slice(1)}`, { method: "POST" });
+    if (!r.ok) throw new Error(await r.text() || r.statusText);
+    payload = await r.json();
+  } catch (e) {
+    $("batch-status").textContent = "";
+    setStatus("idle", "idle");
+    flash("Batch analysis failed: " + e.message);
+    return;
+  }
+
+  setStatus("idle", "idle");
+  $("batch-status").textContent = "";
+  state.batch = payload;
+  state.batchSource = "fresh";
+  state.batchSiteSort = { col: null, dir: 1 };  // reset sort on a fresh load
+  renderBatchSourceTag();
+  renderBatchMeta(payload);
+  renderBatchInterpretation(payload);
+  renderBatchPerSite(payload);
+  renderBatchPerChannel(payload);
+  refreshBatchArchives();  // a fresh run added one to the archive
+}
+
+function closeBatchView() {
+  $("batch").classList.add("hidden");
+  state.batchSource = null;
+  $("batch-source-tag").innerHTML = "";
+  if (state.selectedSession) {
+    $("detail").classList.remove("hidden");
+    setChip("→ " + state.selectedSession);
+  } else {
+    $("no-session").classList.remove("hidden");
+    setChip("");
+  }
+}
+
+function renderBatchMeta(p) {
+  const w = p.crop_window || {};
+  const win = (w.start_s != null || w.end_s != null)
+    ? `${w.start_s ?? "0"}–${w.end_s ?? "end"} s` : "full";
+  $("batch-meta").innerHTML = `
+    <div class="meta-cell"><div class="k">Sessions</div>
+      <div class="v mono">${p.n_sessions_analyzed} / ${p.n_sessions_total}</div></div>
+    <div class="meta-cell"><div class="k">Failed</div>
+      <div class="v ${p.failed_sessions.length ? "ecg" : "mute"}">${p.failed_sessions.length || "—"}</div></div>
+    <div class="meta-cell"><div class="k">Sites</div>
+      <div class="v mono">${p.per_site.length}</div></div>
+    <div class="meta-cell"><div class="k">FST strata</div>
+      <div class="v ${p.fst_unavailable ? "mute" : "ecg"}">${p.fst_unavailable ? "unavailable" : "available"}</div></div>
+    <div class="meta-cell"><div class="k">Crop window</div>
+      <div class="v mono">${win}</div></div>
+    <div class="meta-cell"><div class="k">Folder</div>
+      <div class="v mono">MDPIdata/</div></div>
+  `;
+}
+
+// Per-site aggregate table. Headers are sortable: clicking toggles
+// ascending → descending → unsorted (back to backend order). The
+// mean-of-{mean,std} cells extract `.mean` for the comparator.
+const SITE_COLS = [
+  { key: "site",              label: "Site",            getter: r => r.site,                        type: "str"  },
+  { key: "n_channels",        label: "#ch",             getter: r => r.n_channels,                  type: "num"  },
+  { key: "matched_beats_total", label: "Σ matched",     getter: r => r.matched_beats_total,         type: "num"  },
+  { key: "ssqi",              label: "SSQI μ±σ",        getter: r => r.ssqi?.mean,                  type: "num"  },
+  { key: "zsqi_mean",         label: "ZSQI μ μ±σ",      getter: r => r.zsqi_mean?.mean,             type: "num"  },
+  { key: "ccc",               label: "CCC μ±σ",         getter: r => r.ccc?.mean,                   type: "num"  },
+  { key: "icc",               label: "ICC μ±σ",         getter: r => r.icc?.mean,                   type: "num"  },
+  { key: "pearson_r",         label: "Pearson μ±σ",     getter: r => r.pearson_r?.mean,             type: "num"  },
+  { key: "bias_ms",           label: "Bias (ms) μ±σ",   getter: r => r.bias_ms?.mean,               type: "num"  },
+  { key: "loa_span_ms",       label: "LOA span (ms) μ±σ", getter: r => r.loa_span_ms?.mean,         type: "num"  },
+  { key: "rmse_ms",           label: "RMSE / MAE (ms)", getter: r => r.rmse_ms?.mean,               type: "num"  },
+];
+
+function renderBatchPerSite(p) {
+  const tbl = $("batch-per-site-table");
+  const rawSites = p.per_site || [];
+  const { col, dir } = state.batchSiteSort;
+  let sites = rawSites.slice();
+  if (col != null && SITE_COLS[col]) {
+    const g = SITE_COLS[col].getter;
+    const isStr = SITE_COLS[col].type === "str";
+    sites.sort((a, b) => {
+      const va = g(a), vb = g(b);
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;       // null/NaN sink to the bottom regardless of dir
+      if (vb == null) return -1;
+      if (isStr) return String(va).localeCompare(String(vb)) * dir;
+      return ((+va) - (+vb)) * dir;
+    });
+  }
+  $("batch-per-site-summary").textContent =
+    `${rawSites.length} body sites · grouped across ${p.n_sessions_analyzed} sessions`;
+
+  const ths = SITE_COLS.map((c, i) => {
+    const isSorted = state.batchSiteSort.col === i;
+    const glyph = !isSorted ? "▴▾" : (state.batchSiteSort.dir > 0 ? "▴" : "▾");
+    return `<th class="sortable${isSorted ? " sorted" : ""}" data-col="${i}">${c.label}<span class="sort-glyph">${glyph}</span></th>`;
+  }).join("");
+  let html = `<thead><tr>${ths}</tr></thead><tbody>`;
+
+  if (!sites.length) {
+    html += `<tr><td colspan="${SITE_COLS.length}" class="muted">no sessions analyzed</td></tr>`;
+  }
+
+  sites.forEach(row => {
+    const cccCls = gradeCCC(row.ccc?.mean);
+    const iccCls = gradeCCC(row.icc?.mean);
+    html += `<tr>
+      <td class="ch-name">${row.site}</td>
+      <td>${row.n_channels}</td>
+      <td>${(row.matched_beats_total || 0).toLocaleString()}</td>
+      <td>${fmtMS(row.ssqi)}</td>
+      <td>${fmtMS(row.zsqi_mean)}</td>
+      <td class="${cccCls}">${fmtMS(row.ccc)}</td>
+      <td class="${iccCls}">${fmtMS(row.icc)}</td>
+      <td>${fmtMS(row.pearson_r)}</td>
+      <td>${fmtMSsigned(row.bias_ms, 1)}</td>
+      <td>${fmtMS(row.loa_span_ms, 0)}</td>
+      <td>${fmtMS(row.rmse_ms, 1)} / ${fmtMS(row.mae_ms, 1)}</td>
+    </tr>`;
+  });
+  tbl.innerHTML = html + "</tbody>";
+  tbl.querySelectorAll("thead th.sortable").forEach(th => {
+    th.tabIndex = 0;
+    const act = () => sortBatchSite(parseInt(th.dataset.col, 10));
+    th.addEventListener("click", act);
+    th.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); act(); }});
+  });
+}
+
+// Tri-state sort cycle: asc → desc → unsorted. Re-renders the table
+// in place from the cached state.batch payload — no re-fetch.
+function sortBatchSite(colIdx) {
+  const cur = state.batchSiteSort;
+  if (cur.col !== colIdx) state.batchSiteSort = { col: colIdx, dir: 1 };
+  else if (cur.dir === 1) state.batchSiteSort = { col: colIdx, dir: -1 };
+  else state.batchSiteSort = { col: null, dir: 1 };
+  if (state.batch) renderBatchPerSite(state.batch);
+}
+
+function renderBatchPerChannel(p) {
+  const tbl = $("batch-per-channel-table");
+  const sess = p.sessions || [];
+  const totalRows = sess.reduce((a, s) => a + (s.results || []).length, 0);
+  $("batch-per-channel-summary").textContent =
+    `${totalRows} channel rows · ${sess.length} sessions`;
+
+  // Tighter column set — session identity is in the group-header row
+  // above each block, so the channel rows don't carry PID/FST/Session.
+  // RMSE/MAE share a cell so the table fits without horizontal scroll.
+  let html = `<thead><tr>
+    <th>Ch</th><th>Site</th>
+    <th>fs (Hz)</th><th>SSQI</th>
+    <th>ZSQI μ</th><th>Matched</th>
+    <th>CCC</th><th>ICC</th><th>Pearson</th>
+    <th>Bias (ms)</th><th>LOA± (ms)</th>
+    <th>RMSE / MAE</th>
+  </tr></thead><tbody>`;
+  const COL_SPAN = 12;
+
+  if (!sess.length) {
+    html += `<tr><td colspan="${COL_SPAN}" class="muted">no sessions analyzed</td></tr>`;
+  }
+
+  sess.forEach((sx, sessIdx) => {
+    const pid = sx.participant?.participant_id || "";
+    const fst = sx.participant?.fitzpatrick;
+    const fstStr = fst ? ["I","II","III","IV","V","VI"][fst - 1] : "";
+    const sessName = sx.session_name;
+    const ecg = sx.ecg || {};
+    const niceTs = (sx.started_at || sessName).replace("T", " ").slice(0, 19);
+    const meta = [
+      `<span class="sess-id-full mono">${sessName}</span>`,
+      `<span class="sess-ts">${niceTs}</span>`,
+      pid ? `<span class="sess-tag">PID <b>${pid}</b></span>` : "",
+      fstStr ? `<span class="sess-tag fst">FST <b>${fstStr}</b></span>` : "",
+      ecg.mean_hr_bpm ? `<span class="sess-tag">HR <b>${ecg.mean_hr_bpm.toFixed(0)} bpm</b></span>` : "",
+      ecg.duration_s ? `<span class="sess-tag">duration <b>${ecg.duration_s.toFixed(1)} s</b></span>` : "",
+      `<span class="sess-tag">${(sx.results || []).length} channels</span>`,
+    ].filter(Boolean).join("");
+
+    // Session group header — full session_YYYYMMDD_HHMMSS id is the
+    // headline, with PID/FST/HR/duration as inline tags. Clicking the
+    // ID drills into the per-session detail view.
+    html += `<tr class="sess-group" data-sess-idx="${sessIdx + 1}">
+      <td colspan="${COL_SPAN}" class="sess-group-cell">
+        <span class="sess-counter mono">[ ${sessIdx + 1} / ${sess.length} ]</span>
+        <a href="#" data-sess="${sessName}" class="sess-link">${meta}</a>
+      </td>
+    </tr>`;
+
+    (sx.results || []).forEach(row => {
+      const s = row.stats;
+      const cccCls = s ? gradeCCC(s.ccc) : "";
+      const iccCls = s ? gradeCCC(s.icc) : "";
+      html += `<tr class="sess-row">
+        <td class="ch-name">ch${row.channel}</td>
+        <td class="site">${row.site || "—"}</td>
+        <td>${fmt(row.ppg_fs_hz, 1)}</td>
+        <td>${fmt(row.ssqi, 3)}</td>
+        <td>${fmt(row.zsqi_mean, 3)}</td>
+        <td>${row.n_matched_beats}</td>
+        <td class="${cccCls}">${s ? fmt(s.ccc, 3) : "—"}</td>
+        <td class="${iccCls}">${s ? fmt(s.icc, 3) : "—"}</td>
+        <td>${s ? fmt(s.pearson_r, 3) : "—"}</td>
+        <td>${s ? fmtSigned(s.bias_ms, 1) : "—"}</td>
+        <td>${s ? fmtSigned(s.loa_lower_ms, 0) + " / " + fmtSigned(s.loa_upper_ms, 0) : "—"}</td>
+        <td>${s ? fmt(s.rmse_ms, 1) + " / " + fmt(s.mae_ms, 1) : "—"}</td>
+      </tr>`;
+    });
+  });
+
+  tbl.innerHTML = html + "</tbody>";
+  tbl.querySelectorAll(".sess-link").forEach(a => {
+    a.addEventListener("click", (e) => {
+      e.preventDefault();
+      selectSession(a.dataset.sess);
+    });
+  });
+}
+
+// "mean ± std" formatter for the per-site row cells. ``n`` controls
+// decimal places (default 3 — works for SSQI/CCC/ICC). NaN reduces to "—".
+function fmtMS(stat, n = 3) {
+  if (!stat || !isFinite(stat.mean)) return "—";
+  return `${stat.mean.toFixed(n)} ± ${(stat.std ?? 0).toFixed(n)}`;
+}
+function fmtMSsigned(stat, n = 1) {
+  if (!stat || !isFinite(stat.mean)) return "—";
+  const sgn = stat.mean >= 0 ? "+" : "";
+  return `${sgn}${stat.mean.toFixed(n)} ± ${(stat.std ?? 0).toFixed(n)}`;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   INTERPRETATION RENDERING — session & batch plain-English summaries
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// Render the per-session interpretation block above the SQI table.
+// Reads state.analysis.interpretation (backend-emitted). Silent no-op if
+// the analysis errored or the field is absent (older cached payloads).
+function renderSessionInterpretation() {
+  const block = $("session-interp-block");
+  const host = $("session-interp");
+  const ana = state.analysis;
+  const interp = ana?.interpretation;
+  if (!interp || !interp.headline) {
+    block.classList.add("hidden");
+    host.innerHTML = "";
+    return;
+  }
+  block.classList.remove("hidden");
+
+  const cards = (interp.channel_summaries || []).map(c => verdictCardHTML(c)).join("");
+  const notes = (interp.notes || []);
+
+  host.innerHTML = `
+    <h2 class="interp-headline">${escHTML(interp.headline)}</h2>
+    ${interp.ecg_text ? `<p class="interp-sub">${escHTML(interp.ecg_text)}</p>` : ""}
+    ${cards ? `<div class="verdict-grid">${cards}</div>` : ""}
+    ${notes.length ? notesBlockHTML(notes) : ""}
+  `;
+}
+
+// Render the batch-level interpretation block above the per-site table.
+function renderBatchInterpretation(p) {
+  const block = $("batch-interp-block");
+  const host = $("batch-interp");
+  const interp = p?.interpretation;
+  if (!interp || !interp.headline) {
+    block.classList.add("hidden");
+    host.innerHTML = "";
+    return;
+  }
+  block.classList.remove("hidden");
+
+  const rows = (interp.site_summaries || []).map(s => {
+    const cls = "vc-" + (s.grade || "warn");
+    return `
+      <div class="site-verdict ${cls}">
+        <span class="sv-site">${escHTML(s.site || "—")}</span>
+        <span class="sv-pill">${escHTML((s.grade || "—").toUpperCase())}</span>
+        <span class="sv-text">${escHTML(s.text || "")}</span>
+      </div>`;
+  }).join("");
+
+  host.innerHTML = `
+    <h2 class="interp-headline">${escHTML(interp.headline)}</h2>
+    ${rows ? `<div class="site-verdict-list">${rows}</div>` : ""}
+    ${(interp.notes || []).length ? notesBlockHTML(interp.notes) : ""}
+  `;
+}
+
+// One per-channel verdict card. The grade controls the left border and
+// pill colour. Lines are rendered as bullets; advice is a callout box.
+function verdictCardHTML(c) {
+  const cls = "vc-" + (c.grade || "warn");
+  const lines = (c.lines || []).map(l => `<li>${escHTML(l)}</li>`).join("");
+  const advice = c.advice ? `<div class="vc-advice">${escHTML(c.advice)}</div>` : "";
+  return `
+    <div class="verdict-card ${cls}">
+      <div class="vc-head">
+        <span class="vc-grade-pill">${escHTML((c.grade || "—").toUpperCase())}</span>
+        <span>${escHTML(c.verdict || "")}</span>
+      </div>
+      ${lines ? `<ul class="vc-lines">${lines}</ul>` : ""}
+      ${advice}
+    </div>`;
+}
+
+function notesBlockHTML(notes) {
+  const items = notes.map(n => `<li>${escHTML(n)}</li>`).join("");
+  return `
+    <div class="interp-notes">
+      <span class="nlabel">Notes</span>
+      <ul>${items}</ul>
+    </div>`;
+}
+
+// Minimal HTML escaper — backend text may contain <, &, etc. and we
+// inject via innerHTML for layout flexibility, so explicit escape.
+function escHTML(s) {
+  if (s == null) return "";
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   RUN HISTORY — collapsible timeline above the run-history block
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+async function toggleHistory() {
+  const open = !state.historyOpen;
+  state.historyOpen = open;
+  $("btn-history-toggle").setAttribute("aria-expanded", open ? "true" : "false");
+  if (!open) {
+    $("history-list").classList.add("hidden");
+    const n = state.sessionDetail?.history_count || 0;
+    $("btn-history-toggle").textContent = n ? `▸ Show history (${n})` : "▸ Show history";
+    return;
+  }
+  // Open: fetch (or refresh) and reveal.
+  await loadHistory(state.selectedSession, false);
+  $("history-list").classList.remove("hidden");
+  const n = (state.history || []).length;
+  $("btn-history-toggle").textContent = `▾ Hide history (${n})`;
+}
+
+async function loadHistory(name, forceVisible) {
+  if (!name) return;
+  const list = $("history-list");
+  list.innerHTML = `<li class="history-empty">loading…</li>`;
+  if (forceVisible) {
+    list.classList.remove("hidden");
+    state.historyOpen = true;
+    $("btn-history-toggle").setAttribute("aria-expanded", "true");
+  }
+  try {
+    const events = await fetch(`/api/sessions/${name}/history?limit=500`)
+      .then(r => r.json());
+    state.history = Array.isArray(events) ? events : [];
+  } catch (e) {
+    list.innerHTML = `<li class="history-empty">failed to load history: ${escHTML(e.message)}</li>`;
+    return;
+  }
+  renderHistoryList();
+  if (forceVisible) {
+    const n = state.history.length;
+    $("btn-history-toggle").textContent = `▾ Hide history (${n})`;
+  }
+}
+
+function renderHistoryList() {
+  const list = $("history-list");
+  const events = state.history || [];
+  if (!events.length) {
+    list.innerHTML = `<li class="history-empty">no events recorded for this session yet</li>`;
+    return;
+  }
+  list.innerHTML = events.map(ev => {
+    const ts = (ev.ts || "").replace("T", " ").slice(0, 19);
+    const pill = `<span class="hpill evt-${escHTML(ev.event || "unknown")}">${escHTML(ev.event || "?")}</span>`;
+    return `<li>
+      <span class="hts">${escHTML(ts)}</span>
+      ${pill}
+      <span class="hsum">${escHTML(summarizeEvent(ev))}</span>
+    </li>`;
+  }).join("");
+}
+
+// Best-effort one-line summary for each event-type. Falls back to a
+// compact JSON snippet so unknown event types still show something useful.
+function summarizeEvent(ev) {
+  const d = ev.data || {};
+  switch (ev.event) {
+    case "recording_started": {
+      const port = d.port ? ` on ${d.port}` : "";
+      return `recording started${port}`;
+    }
+    case "recording_stopped": {
+      const code = d.exit_code != null ? `exit ${d.exit_code}` : "stopped";
+      return `recording ${code}`;
+    }
+    case "metadata_edited": {
+      const after = d.after || {};
+      const pid = after.participant_id ? `PID ${after.participant_id}` : "no PID";
+      const fst = after.fitzpatrick ? `FST ${["I","II","III","IV","V","VI"][after.fitzpatrick - 1]}` : "";
+      const sites = after.channel_sites ? Object.keys(after.channel_sites).length + " site mappings" : "";
+      return [pid, fst, sites].filter(Boolean).join(", ");
+    }
+    case "analysis_run": {
+      const n = d.n_channels || 0;
+      const sum = d.summary || {};
+      const ccs = Object.entries(sum).map(([ch, s]) => [ch, s?.ccc]).filter(([, c]) => c != null);
+      if (!ccs.length) return `${n} channels analysed`;
+      const best = ccs.reduce((a, b) => (b[1] > a[1] ? b : a));
+      const crop = d.crop_window || {};
+      const win = (crop.start_s != null || crop.end_s != null)
+        ? ` (window ${crop.start_s ?? "0"}–${crop.end_s ?? "end"} s)` : "";
+      return `${n} channels, best CCC ${(+best[1]).toFixed(3)} on ch${best[0]}${win}`;
+    }
+    case "batch_analysis_included": {
+      const id = d.batch_id || "?";
+      const pos = (d.session_position && d.total) ? `position ${d.session_position}/${d.total}` : "";
+      return `included in batch ${id}${pos ? " · " + pos : ""}`;
+    }
+    case "sleepiness_analysis_included": {
+      const id = d.run_id || "?";
+      const pos = (d.session_position && d.total) ? `position ${d.session_position}/${d.total}` : "";
+      const ecg = d.ecg_spi != null && isFinite(d.ecg_spi) ? `ECG SPI ${(+d.ecg_spi).toFixed(3)}` : "ECG SPI —";
+      const ppg = d.ppg_spi_weighted != null && isFinite(d.ppg_spi_weighted) ? `PPG SPI ${(+d.ppg_spi_weighted).toFixed(3)}` : "PPG SPI —";
+      return `included in sleepiness run ${id}${pos ? " · " + pos : ""} · ${ecg}, ${ppg}`;
+    }
+    default:
+      try { return JSON.stringify(d).slice(0, 140); } catch { return ""; }
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   RECEIVER LOG — modal showing the captured subprocess stdout/stderr
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+async function openReceiverLog() {
+  const name = state.selectedSession;
+  if (!name) return;
+  if (!state.sessionDetail?.has_receiver_log) {
+    flash("No receiver log on disk for this session.");
+    return;
+  }
+  $("recv-log-meta").innerHTML = `Showing the last 500 lines from <b>${escHTML(name)}</b>/receiver.log.`;
+  $("recv-log-pre").textContent = "loading…";
+  openModal("recv-log-modal");
+  await refreshReceiverLog();
+}
+
+async function refreshReceiverLog() {
+  const name = state.selectedSession;
+  if (!name) return;
+  const pre = $("recv-log-pre");
+  pre.classList.remove("empty");
+  pre.textContent = "loading…";
+  try {
+    const r = await fetch(`/api/sessions/${name}/receiver_log?tail=500`).then(r => r.json());
+    const log = (r && r.log) || "";
+    if (!log.trim()) {
+      pre.textContent = "(receiver.log is empty)";
+      pre.classList.add("empty");
+    } else {
+      pre.textContent = log;
+      pre.scrollTop = pre.scrollHeight;
+    }
+  } catch (e) {
+    pre.textContent = "failed to load: " + e.message;
+    pre.classList.add("empty");
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BATCH ARCHIVE — sidebar count chip + browse modal + reload past runs
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+async function refreshBatchArchives() {
+  try {
+    state.batchArchives = await fetch("/api/batch_analyses").then(r => r.json());
+  } catch {
+    state.batchArchives = [];
+  }
+  const n = state.batchArchives.length;
+  $("batch-archive-count").textContent = n;
+  setEnabled("btn-browse-archive", n > 0);
+}
+
+function openArchiveModal() {
+  if (!state.batchArchives.length) return;
+  const ul = $("archive-list");
+  ul.innerHTML = state.batchArchives.map(b => {
+    const ts = (b.created_at || "").replace("T", " ").slice(0, 19);
+    const w = b.crop_window || {};
+    const win = (w.start_s != null || w.end_s != null)
+      ? `${w.start_s ?? "0"}–${w.end_s ?? "end"} s` : "full window";
+    return `<li tabindex="0" data-id="${escHTML(b.batch_id)}">
+      <span class="arc-id">${escHTML(b.batch_id)}</span>
+      <span class="arc-meta">${escHTML(ts)} · ${escHTML(win)}</span>
+      <span class="arc-n">${b.n_sessions_analyzed ?? 0} sess</span>
+    </li>`;
+  }).join("") || `<li class="archive-empty">no saved batch runs yet</li>`;
+  ul.querySelectorAll("li[data-id]").forEach(li => {
+    const id = li.dataset.id;
+    const act = () => loadBatchFromArchive(id);
+    li.addEventListener("click", act);
+    li.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); act(); }});
+  });
+  openModal("batch-archive-modal");
+}
+
+async function loadBatchFromArchive(batchId) {
+  closeModal("batch-archive-modal");
+  setStatus("analyzing", "analyzing");
+  $("batch-status").textContent = "loading archive…";
+  // Mirror runBatchAnalysis's view-swap so the user sees the same screen.
+  $("no-session").classList.add("hidden");
+  $("detail").classList.add("hidden");
+  $("sleepiness").classList.add("hidden");
+  $("batch").classList.remove("hidden");
+  setChip("→ batch · " + batchId);
+
+  let payload;
+  try {
+    payload = await fetch(`/api/batch_analyses/${batchId}`).then(r => {
+      if (!r.ok) throw new Error(r.statusText);
+      return r.json();
+    });
+  } catch (e) {
+    setStatus("idle", "idle");
+    $("batch-status").textContent = "";
+    flash("Failed to load batch " + batchId + ": " + e.message);
+    return;
+  }
+  setStatus("idle", "idle");
+  $("batch-status").textContent = "";
+  state.batch = payload;
+  state.batchSource = { batch_id: batchId, created_at: payload.created_at };
+  state.batchSiteSort = { col: null, dir: 1 };
+  renderBatchSourceTag();
+  renderBatchMeta(payload);
+  renderBatchInterpretation(payload);
+  renderBatchPerSite(payload);
+  renderBatchPerChannel(payload);
+}
+
+function renderBatchSourceTag() {
+  const tag = $("batch-source-tag");
+  if (!tag) return;
+  if (!state.batchSource) { tag.innerHTML = ""; return; }
+  if (state.batchSource === "fresh") {
+    tag.innerHTML = `<span class="batch-archive-tag fresh">● live run</span>`;
+  } else {
+    const id = state.batchSource.batch_id;
+    const ts = (state.batchSource.created_at || "").replace("T", " ").slice(0, 19);
+    tag.innerHTML = `<span class="batch-archive-tag archive" title="${escHTML(ts)}">archive · ${escHTML(id)}</span>`;
+  }
+}
+
+// Per-site aggregate → CSV. Emits the same column order as the table,
+// flattens {mean, std} into two columns each. UTF-8 BOM for Excel.
+function exportBatchCSV() {
+  const p = state.batch;
+  if (!p || !p.per_site) { flash("Nothing to export — run a batch first."); return; }
+  const header = ["site", "n_channels", "matched_beats_total"];
+  const metricCols = ["ssqi", "zsqi_mean", "ccc", "icc", "pearson_r",
+                      "bias_ms", "loa_span_ms", "rmse_ms", "mae_ms"];
+  metricCols.forEach(c => { header.push(c + "_mean", c + "_std"); });
+  const lines = [header.join(",")];
+
+  (p.per_site || []).forEach(row => {
+    const cells = [csvCell(row.site), row.n_channels, row.matched_beats_total];
+    metricCols.forEach(c => {
+      const s = row[c] || {};
+      cells.push(isFinite(s.mean) ? s.mean : "", isFinite(s.std) ? s.std : "");
+    });
+    lines.push(cells.join(","));
+  });
+
+  const tag = (state.batchSource && state.batchSource !== "fresh")
+    ? state.batchSource.batch_id
+    : ("batch_" + new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14));
+  const blob = new Blob(["﻿" + lines.join("\n") + "\n"],
+                       { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `per_site_${tag}.csv`;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
+}
+function csvCell(v) {
+  if (v == null) return "";
+  const s = String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ONBOARDING — first-launch multi-step guide, also accessible from the
+   header "?" button. Six panels, dot navigation, "don't show again" flag.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const ONB_STEPS = [
+  {
+    title: "Welcome to SEAL · PPG",
+    body: `
+      <p>This dashboard captures multi-site photoplethysmography (PPG) and an ECG reference, then scores agreement between them per channel, per body site, and across the whole cohort.</p>
+      <p>The layout has three columns:</p>
+      <ul>
+        <li><strong>Left — Record.</strong> Pick a serial port, fill participant metadata, start/stop a capture.</li>
+        <li><strong>Middle — Sessions.</strong> Every recording in <code>MDPIdata/</code>, filterable, with persistence badges.</li>
+        <li><strong>Right — Detail / Batch.</strong> ECG hero, per-channel PPG, plain-English verdicts, SQI &amp; agreement table, Bland-Altman plots — or the cohort-wide batch view.</li>
+      </ul>
+    `,
+  },
+  {
+    title: "Recording a session",
+    body: `
+      <p>From the <strong>Record</strong> column:</p>
+      <ul>
+        <li>Pick the serial port (use <code>⟳</code> to rescan) and the baud (defaults to 115200).</li>
+        <li>Enter Participant ID, Fitzpatrick skin type, and notes — these write into <code>participant.json</code>.</li>
+        <li>Assign each channel to a body site (finger, forehead, earlobe, …). The map persists locally so you don't re-enter it next session.</li>
+        <li>Press <strong>● Start</strong>. A new <code>session_YYYYMMDD_HHMMSS/</code> folder appears under <code>MDPIdata/</code>; counters and the live log update once per second.</li>
+        <li>Press <strong>■ Stop</strong> when done — the receiver subprocess flushes its log and the dashboard auto-runs analysis.</li>
+      </ul>
+    `,
+  },
+  {
+    title: "One session vs the whole batch",
+    body: `
+      <p>There are two analysis modes:</p>
+      <ul>
+        <li><strong>Per-session.</strong> Click a session in the middle column, then <strong>Run analysis</strong> in the detail header (or wait for the auto-run on recording stop). Optional <strong>Window</strong> inputs crop the data to a specific second range.</li>
+        <li><strong>Batch (cohort).</strong> Use <strong>▦ Analyze all sessions</strong> in the Sessions sidebar. Every session in <code>MDPIdata/</code> gets re-scored with the same crop window, then aggregated per body site.</li>
+      </ul>
+      <p>Past batch runs are auto-archived. The <strong>Browse archive</strong> button reloads any saved run without re-computing it.</p>
+    `,
+  },
+  {
+    title: "Where files land on disk",
+    body: `
+      <p>Everything written by the dashboard lives under <code>MDPIdata/</code>:</p>
+      <ul class="onb-file-list">
+        <li class="dir">session_YYYYMMDD_HHMMSS/</li><li> </li>
+        <li>ecg_data.csv</li>
+        <li>ppg_data_ch{0..N}.csv</li>
+        <li>participant.json</li>
+        <li>analysis.json</li>
+        <li>history.jsonl</li>
+        <li>receiver.log</li>
+        <li class="dir">batch_analyses/</li>
+        <li>batch_YYYYMMDD_HHMMSS.json</li>
+      </ul>
+      <p style="margin-top:14px;">Deleting a session from the dashboard removes the entire <code>session_*/</code> folder. Batch archives never auto-prune.</p>
+    `,
+  },
+  {
+    title: "Reading the interpretation grades",
+    body: `
+      <p>After every analysis run, each channel gets a plain-English verdict card. The grade colour summarises agreement with the ECG reference:</p>
+      <div class="onb-grid">
+        <div class="onb-grade good"><span class="pill">GOOD</span><span class="desc">CCC &gt; 0.95 — ECG-grade signal.</span></div>
+        <div class="onb-grade ok"><span class="pill">OK</span><span class="desc">CCC &gt; 0.90 — usable with caveats.</span></div>
+        <div class="onb-grade warn"><span class="pill">WARN</span><span class="desc">CCC &gt; 0.50 — inspect before using.</span></div>
+        <div class="onb-grade bad"><span class="pill">BAD</span><span class="desc">No agreement — re-check sensor.</span></div>
+      </div>
+      <p style="margin-top:14px;">The batch view applies the same grades at the per-site level, so you can see which body sites are reliable across the cohort.</p>
+    `,
+  },
+  {
+    title: "SQI · CCC · ICC — what the metrics mean",
+    body: `
+      <p>The SQI &amp; agreement table breaks down per-channel quality:</p>
+      <ul>
+        <li><strong>SSQI</strong> — skewness of the PPG amplitude; positive values mean systolic peaks dominate (good morphology).</li>
+        <li><strong>ZSQI</strong> — beat-by-beat z-score statistic; tight μ±σ implies a stable waveform.</li>
+        <li><strong>CCC / ICC</strong> — Lin's Concordance Correlation and Intra-class Correlation between matched PPI (PPG) and RR (ECG) intervals. Above 0.95 is substantial agreement; above 0.90 is moderate; below 0.50 is failing.</li>
+        <li><strong>Bias / LOA / RMSE</strong> — Bland-Altman pieces: mean signed offset, ±1.96σ limits-of-agreement, and root-mean-square error per beat.</li>
+      </ul>
+      <p>The Bland-Altman plot at the bottom of each session visualises bias and LOA directly. You can re-open this guide any time via the <strong>?</strong> button in the top bar.</p>
+    `,
+  },
+];
+let onbStep = 0;
+
+function openOnboarding(reset) {
+  onbStep = 0;
+  $("onb-skip-cb").checked = !!localStorage.getItem("seal_ppg_onboarded");
+  renderOnboardingStep();
+  buildOnbDots();
+  openModal("onb-modal");
+}
+function buildOnbDots() {
+  const host = $("onb-dots");
+  // Numbered step indicators: each button shows its 1-based index. Past
+  // steps get .completed, current step gets .active. Much easier to read
+  // than tiny anonymous dots, and you can jump straight to any step.
+  host.innerHTML = ONB_STEPS.map((_, i) => {
+    const cls = i === onbStep ? "active" : (i < onbStep ? "completed" : "");
+    return `<button class="onb-dot ${cls}" data-i="${i}" aria-label="Step ${i+1}"${i === onbStep ? ' aria-current="step"' : ''}>${i + 1}</button>`;
+  }).join("");
+  host.querySelectorAll(".onb-dot").forEach(d => {
+    d.addEventListener("click", () => { onbStep = parseInt(d.dataset.i, 10); renderOnboardingStep(); buildOnbDots(); });
+  });
+}
+function renderOnboardingStep() {
+  const s = ONB_STEPS[onbStep];
+  $("onb-step").textContent = `Step ${onbStep + 1} of ${ONB_STEPS.length}`;
+  $("onb-title").textContent = s.title;
+  $("onb-body").innerHTML = s.body;
+  $("onb-back").disabled = onbStep === 0;
+  $("onb-next").textContent = onbStep === ONB_STEPS.length - 1 ? "Done" : "Next";
+}
+function onbNext() {
+  if (onbStep === ONB_STEPS.length - 1) {
+    // Always set the flag on Done, regardless of checkbox state — Done = "I've finished it".
+    try { localStorage.setItem("seal_ppg_onboarded", "1"); } catch {}
+    closeModal("onb-modal");
+    return;
+  }
+  onbStep++;
+  renderOnboardingStep();
+  buildOnbDots();
+}
+function onbBack() {
+  if (onbStep > 0) {
+    onbStep--;
+    renderOnboardingStep();
+    buildOnbDots();
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   COHORT SLEEPINESS SUMMARY (Σ button) — SPI cohort analysis page
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// Open the sleepiness view. If prefer_cached, try to load the latest
+// saved run first (so the page opens instantly); otherwise re-run the
+// analysis. The "Re-run" button always sets prefer_cached=false.
+async function runSleepinessSummary({prefer_cached = true} = {}) {
+  // Swap views: hide batch + per-session detail + no-session placeholder.
+  $("no-session").classList.add("hidden");
+  $("detail").classList.add("hidden");
+  $("batch").classList.add("hidden");
+  $("sleepiness").classList.remove("hidden");
+  setChip("→ total summary · cohort sleepiness");
+
+  $("slp-status").textContent = prefer_cached ? "loading…" : "running…";
+  setStatus("analyzing", "analyzing");
+
+  // Try the cache first when allowed.
+  let payload = null;
+  let isCached = false;
+  if (prefer_cached) {
+    try {
+      const r = await fetch("/api/sleepiness_summary/latest");
+      if (r.ok) {
+        const j = await r.json();
+        if (j && j.cached !== false && j.run_id) {
+          payload = j;
+          isCached = true;
+        }
+      }
+    } catch { /* fall through to fresh run */ }
+  }
+
+  if (!payload) {
+    try {
+      const weighting = encodeURIComponent($("slp-weighting").value || "ssqi_zsqi");
+      const w = windowQS();
+      const r = await fetch(`/api/sleepiness_summary?weighting=${weighting}${w}`,
+                             { method: "POST" });
+      if (!r.ok) throw new Error(await r.text() || r.statusText);
+      payload = await r.json();
+      isCached = false;
+    } catch (e) {
+      $("slp-status").textContent = "";
+      setStatus("idle", "idle");
+      flash("Sleepiness summary failed: " + e.message);
+      return;
+    }
+  }
+
+  setStatus("idle", "idle");
+  $("slp-status").textContent = "";
+  state.sleepiness = payload;
+  state.sleepinessSource = isCached ? "cached" : "fresh";
+  renderSleepinessSourceTag();
+  renderSleepinessCaveats(payload);
+  renderSleepinessScatter(payload);
+  renderSleepinessPerSite(payload);
+  renderSleepinessBlandAltman(payload);
+  renderSleepinessFeatures(payload);
+  renderSleepinessFstTable(payload);
+  renderSleepinessInterpretation(payload);
+}
+
+function closeSleepinessView() {
+  $("sleepiness").classList.add("hidden");
+  state.sleepinessSource = null;
+  // Tear down Plotly instances inside the sleepiness view so listeners
+  // are released cleanly (same purgePlots pattern as session-switch).
+  purgePlots($("sleepiness"));
+  if (state.selectedSession) {
+    $("detail").classList.remove("hidden");
+    setChip("→ " + state.selectedSession);
+  } else {
+    $("no-session").classList.remove("hidden");
+    setChip("");
+  }
+}
+
+function renderSleepinessSourceTag() {
+  const tag = $("slp-source-tag");
+  if (!tag) return;
+  if (!state.sleepinessSource) { tag.innerHTML = ""; return; }
+  if (state.sleepinessSource === "fresh") {
+    tag.innerHTML = `<span class="slp-tag fresh">● live run</span>`;
+  } else {
+    const id = state.sleepiness?.run_id || "";
+    tag.innerHTML = `<span class="slp-tag archive">cached · ${escHTML(id)}</span>`;
+  }
+}
+
+function renderSleepinessCaveats(p) {
+  const ul = $("slp-caveats-list");
+  const caveats = (p && p.caveats) || [];
+  if (!caveats.length) {
+    ul.innerHTML = `<li class="muted">no caveats reported</li>`;
+    return;
+  }
+  ul.innerHTML = caveats.map(c => `<li>${escHTML(c)}</li>`).join("");
+}
+
+function renderSleepinessScatter(p) {
+  const block = $("slp-cohort-scatter-block");
+  const el = $("slp-cohort-plot");
+  const pts = (p && p.scatter_points) || [];
+  if (!pts.length) {
+    block.classList.add("hidden");
+    return;
+  }
+  block.classList.remove("hidden");
+
+  // Group points by site so each site gets its own Plotly trace and the
+  // chColor palette mirrors per-channel colours used elsewhere.
+  const bySite = {};
+  pts.forEach(pt => {
+    if (!isFinite(pt.ecg_spi) || !isFinite(pt.ppg_spi)) return;
+    (bySite[pt.site] = bySite[pt.site] || []).push(pt);
+  });
+
+  const traces = [];
+  let chIdx = 0;
+  // Stable site ordering so trace colours are consistent across renders.
+  const siteNames = Object.keys(bySite).sort();
+  siteNames.forEach(site => {
+    const rows = bySite[site];
+    const color = chColor(chIdx++);
+    traces.push({
+      x: rows.map(r => r.ecg_spi),
+      y: rows.map(r => r.ppg_spi),
+      type: "scatter", mode: "markers",
+      marker: { size: 9, color, opacity: 0.85,
+                line: { color: C.panel, width: 0.8 } },
+      name: site,
+      text: rows.map(r => r.session_name),
+      hovertemplate: site + " · %{text}<br>ECG SPI %{x:.3f} · PPG SPI %{y:.3f}<extra></extra>",
+    });
+  });
+
+  // Identity (y = x) line — extends slightly past data extent.
+  const all = pts.flatMap(r => [r.ecg_spi, r.ppg_spi]).filter(isFinite);
+  let lo = -1, hi = 1;
+  if (all.length) {
+    lo = Math.min(...all) - 0.2;
+    hi = Math.max(...all) + 0.2;
+  }
+  traces.push({
+    x: [lo, hi], y: [lo, hi],
+    type: "scatter", mode: "lines",
+    line: { color: C.inkMute, width: 1.2, dash: "dash" },
+    name: "y = x", hoverinfo: "skip", showlegend: true,
+  });
+
+  Plotly.react("slp-cohort-plot", traces, {
+    ...PLOT_BASE,
+    height: 520,
+    showlegend: true,
+    legend: { orientation: "h", y: -0.18 },
+    xaxis: axisStyle({ title: "ECG SPI (cohort z-norm)", showticks: true }),
+    yaxis: axisStyle({ title: "PPG SPI (quality-weighted per site)", showticks: true }),
+  }, PLOT_CFG);
+
+  const nSessions = (p.per_session || []).length;
+  const nSites = (p.per_site || []).length;
+  $("slp-cohort-summary").textContent =
+    `${pts.length} points · ${nSites} sites · ${nSessions} sessions`;
+}
+
+function renderSleepinessPerSite(p) {
+  const tbl = $("slp-per-site-table");
+  const sites = (p && p.per_site) || [];
+  $("slp-per-site-summary").textContent = `${sites.length} body sites`;
+
+  let html = `<thead><tr>
+    <th>Site</th><th>n sessions</th>
+    <th>CCC(SPI)</th><th>Pearson</th>
+    <th>Bias</th><th>±LOA</th>
+    <th>RMSE / MAE</th>
+    <th>mean ECG SPI</th><th>mean PPG SPI</th>
+  </tr></thead><tbody>`;
+  if (!sites.length) {
+    html += `<tr><td colspan="9" class="muted">no sites available</td></tr>`;
+  }
+  sites.forEach(r => {
+    const cccCls = gradeCCC(r.ccc_spi);
+    html += `<tr>
+      <td class="ch-name">${escHTML(r.site || "—")}</td>
+      <td>${r.n_sessions}</td>
+      <td class="${cccCls}">${fmt(r.ccc_spi, 3)}</td>
+      <td>${fmt(r.pearson_r, 3)}</td>
+      <td>${fmtSigned(r.bias, 3)}</td>
+      <td>${fmtSigned(r.loa_lower, 3)} / ${fmtSigned(r.loa_upper, 3)}</td>
+      <td>${fmt(r.rmse, 3)} / ${fmt(r.mae, 3)}</td>
+      <td>${fmtSigned(r.mean_ecg_spi, 3)}</td>
+      <td>${fmtSigned(r.mean_ppg_spi, 3)}</td>
+    </tr>`;
+  });
+  tbl.innerHTML = html + "</tbody>";
+}
+
+function renderSleepinessBlandAltman(p) {
+  const block = $("slp-ba-block");
+  const grid = $("slp-ba-grid");
+  purgePlots(grid);
+  const sites = (p && p.per_site) || [];
+  const scatter = (p && p.scatter_points) || [];
+  const usableSites = sites.filter(s => s.n_sessions >= 2 && isFinite(s.ccc_spi));
+  if (!usableSites.length) {
+    block.classList.add("hidden");
+    grid.innerHTML = "";
+    return;
+  }
+  block.classList.remove("hidden");
+
+  // Group scatter points by site for the BA mini-plot per site.
+  const bySite = {};
+  scatter.forEach(pt => {
+    if (!isFinite(pt.ecg_spi) || !isFinite(pt.ppg_spi)) return;
+    (bySite[pt.site] = bySite[pt.site] || []).push(pt);
+  });
+
+  grid.innerHTML = usableSites.map((row, i) => `
+    <div class="ba-cell">
+      <div class="ba-head">
+        <span class="name">${escHTML(row.site)}</span>
+        <span class="site">n=${row.n_sessions}</span>
+      </div>
+      <div class="ba-stats">CCC <b>${fmt(row.ccc_spi, 3)}</b>
+         · bias <b>${fmtSigned(row.bias, 3)}</b>
+         · LOA <b>${fmtSigned(row.loa_lower, 3)} / ${fmtSigned(row.loa_upper, 3)}</b>
+         · RMSE <b>${fmt(row.rmse, 3)}</b></div>
+      <div class="ba-plot" id="slp-ba-${i}"></div>
+    </div>
+  `).join("");
+
+  usableSites.forEach((row, i) => {
+    const pts = bySite[row.site] || [];
+    const means = pts.map(pt => (pt.ecg_spi + pt.ppg_spi) / 2.0);
+    const diffs = pts.map(pt => pt.ppg_spi - pt.ecg_spi);
+    const color = chColor(i);
+
+    Plotly.react("slp-ba-" + i, [{
+      x: means, y: diffs,
+      type: "scatter", mode: "markers",
+      marker: { size: 7, color, opacity: 0.85,
+                line: { color: C.panel, width: 0.5 } },
+      text: pts.map(pt => pt.session_name),
+      hovertemplate: "%{text}<br>mean %{x:.3f} · diff %{y:.3f}<extra></extra>",
+    }], {
+      ...PLOT_BASE,
+      height: 360,
+      showlegend: false,
+      xaxis: axisStyle({ title: "mean (ECG SPI + PPG SPI) / 2", showticks: true }),
+      yaxis: axisStyle({ title: "PPG SPI − ECG SPI", showticks: true, side: "left" }),
+      shapes: [
+        hline(row.bias,      C.inkMute, "dash"),
+        hline(row.loa_upper, C.ecg,     "dot"),
+        hline(row.loa_lower, C.ecg,     "dot"),
+      ],
+    }, PLOT_CFG);
+  });
+}
+
+function renderSleepinessFeatures(p) {
+  const block = $("slp-features-block");
+  const el = $("slp-features-plot");
+  const contrib = (p && p.feature_contributions_per_site) || {};
+  const sites = Object.keys(contrib).sort();
+  if (!sites.length) {
+    block.classList.add("hidden");
+    return;
+  }
+  block.classList.remove("hidden");
+
+  // Feature order matches the SPI formula: positive contributors first,
+  // then negatives. Colours from chPalette so it visually meshes with
+  // the cohort scatter.
+  const featureOrder = ["rmssd", "hf_nu", "sd1_sd2", "log_lf_hf", "sampen"];
+  const featureLabels = {
+    "rmssd": "z(log RMSSD)",
+    "hf_nu": "z(log HFnu)",
+    "sd1_sd2": "z(SD1/SD2)",
+    "log_lf_hf": "z(log LF/HF) ·(-)",
+    "sampen": "z(SampEn) ·(-)",
+  };
+
+  const traces = featureOrder.map((fk, i) => ({
+    x: sites,
+    y: sites.map(site => contrib[site]?.[fk] ?? 0),
+    type: "bar",
+    name: featureLabels[fk] || fk,
+    marker: { color: chColor(i) },
+    hovertemplate: featureLabels[fk] + " — %{x} · contribution %{y:.3f}<extra></extra>",
+  }));
+
+  Plotly.react("slp-features-plot", traces, {
+    ...PLOT_BASE,
+    height: 420,
+    barmode: "group",
+    showlegend: true,
+    legend: { orientation: "h", y: -0.18 },
+    xaxis: axisStyle({ title: "Site", showticks: true }),
+    yaxis: axisStyle({ title: "weighted z-contribution to SPI (mean across sessions)", showticks: true }),
+  }, PLOT_CFG);
+}
+
+function renderSleepinessFstTable(p) {
+  const tbl = $("slp-fst-table");
+  const rows = (p && p.per_fst_site) || [];
+  const perSession = (p && p.per_session) || [];
+  const total = perSession.length;
+  const withFst = perSession.filter(s => s.fitzpatrick).length;
+
+  if (!rows.length) {
+    // Empty-state message: render as a single block (no <thead>/<tbody>
+    // gymnastics) styled by the empty-state CSS rule.
+    tbl.className = "sqi-table empty-state";
+    tbl.innerHTML = `FST metadata missing on ${total - withFst}/${total} sessions — ` +
+                    `save it on the session sidebar to unlock the skin-type × site agreement table.`;
+    return;
+  }
+  // Normal state: restore the regular table class.
+  tbl.className = "sqi-table";
+
+  let html = `<thead><tr>
+    <th>FST group</th><th>Site</th><th>n sessions</th><th>CCC(SPI)</th>
+  </tr></thead><tbody>`;
+  rows.forEach(r => {
+    const cls = gradeCCC(r.ccc_spi);
+    html += `<tr>
+      <td class="ch-name">${escHTML(r.fst_group)}</td>
+      <td class="site">${escHTML(r.site || "—")}</td>
+      <td>${r.n_sessions}</td>
+      <td class="${cls}">${fmt(r.ccc_spi, 3)}</td>
+    </tr>`;
+  });
+  tbl.innerHTML = html + "</tbody>";
+}
+
+function renderSleepinessInterpretation(p) {
+  const block = $("slp-interp-block");
+  const host = $("slp-interp");
+  const interp = p && p.interpretation;
+  if (!interp || !interp.headline) {
+    block.classList.add("hidden");
+    host.innerHTML = "";
+    return;
+  }
+  block.classList.remove("hidden");
+
+  const rows = (interp.site_summaries || []).map(s => {
+    const cls = "vc-" + (s.grade || "warn");
+    return `
+      <div class="site-verdict ${cls}">
+        <span class="sv-site">${escHTML(s.site || "—")}</span>
+        <span class="sv-pill">${escHTML((s.grade || "—").toUpperCase())}</span>
+        <span class="sv-text">${escHTML(s.text || "")}</span>
+      </div>`;
+  }).join("");
+
+  host.innerHTML = `
+    <h2 class="interp-headline">${escHTML(interp.headline)}</h2>
+    ${rows ? `<div class="site-verdict-list">${rows}</div>` : ""}
+    ${(interp.notes || []).length ? notesBlockHTML(interp.notes) : ""}
+  `;
+}
+
+// Per-site SPI agreement → CSV. Same column order as the table; UTF-8
+// BOM for Excel compatibility.
+function exportSleepinessCSV() {
+  const p = state.sleepiness;
+  if (!p || !p.per_site) { flash("Nothing to export — run the sleepiness summary first."); return; }
+  const header = ["site", "n_sessions", "ccc_spi", "pearson_r",
+                  "bias", "loa_lower", "loa_upper", "rmse", "mae",
+                  "mean_ecg_spi", "mean_ppg_spi", "n_ppg_channels"];
+  const lines = [header.join(",")];
+  (p.per_site || []).forEach(row => {
+    const cells = [
+      csvCell(row.site), row.n_sessions,
+      isFinite(row.ccc_spi) ? row.ccc_spi : "",
+      isFinite(row.pearson_r) ? row.pearson_r : "",
+      isFinite(row.bias) ? row.bias : "",
+      isFinite(row.loa_lower) ? row.loa_lower : "",
+      isFinite(row.loa_upper) ? row.loa_upper : "",
+      isFinite(row.rmse) ? row.rmse : "",
+      isFinite(row.mae) ? row.mae : "",
+      isFinite(row.mean_ecg_spi) ? row.mean_ecg_spi : "",
+      isFinite(row.mean_ppg_spi) ? row.mean_ppg_spi : "",
+      row.n_ppg_channels ?? "",
+    ];
+    lines.push(cells.join(","));
+  });
+  const tag = p.run_id || ("run_" + new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14));
+  const blob = new Blob(["﻿" + lines.join("\n") + "\n"],
+                       { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `sleepiness_per_site_${tag}.csv`;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
 }
