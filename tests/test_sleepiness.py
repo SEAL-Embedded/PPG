@@ -131,6 +131,32 @@ class TestSampleEntropy:
         assert not np.isfinite(sleepiness._sample_entropy(np.array([1.0, 2.0])))
 
 
+# ── Sample entropy off-by-one (H2) ──────────────────────────────────────────
+
+class TestSampleEntropyOffByOne:
+
+    def test_sample_entropy_perfectly_periodic_signal_is_zero(self):
+        """Richman & Moorman 2000 eq. 2 has both phi(m) and phi(m+1) using
+        the SAME N - m templates so the ratio A / B is unbiased.
+
+        On a perfectly periodic integer-sampled signal (e.g. [1,2,3,4,5]
+        repeated), every length-m template that matches another also has
+        a matching length-(m+1) extension (because the signal repeats
+        exactly). So A = B exactly, and -ln(A/B) = 0. The off-by-one form
+        used N-m+1 templates for phi(m) but only N-m for phi(m+1), making
+        B > A and SampEn slightly positive (~0.01 here).
+
+        Bound: ≤ 1e-6 — Richman's form gives exactly 0 (modulo floating
+        point); the off-by-one gives ~0.01.
+        """
+        x = np.tile([1.0, 2.0, 3.0, 4.0, 5.0], 40)  # 200 samples, period 5
+        v = sleepiness._sample_entropy(
+            x, m=2, r=0.2 * float(np.std(x, ddof=1))
+        )
+        assert np.isfinite(v)
+        assert v < 1e-6, f"SampEn of perfectly periodic signal should be 0, got {v}"
+
+
 # ── SPI scoring ─────────────────────────────────────────────────────────────
 
 class TestComputeSleepinessIndex:
