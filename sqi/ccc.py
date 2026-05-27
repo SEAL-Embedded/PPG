@@ -201,7 +201,12 @@ def detect_ppg_peaks(ppg, fs):
         filtered = -filtered
     # 250 ms between beats -> 240 BPM ceiling (covers exercise + arrhythmia)
     min_distance = int(0.25 * fs)
-    prominence_thresh = np.std(filtered) * 0.5
+    # Rolling-window adaptive prominence (8-s window, 2-s stride) using local
+    # std * 0.5. Lets amplitude-drifting recordings still surface peaks in both
+    # halves: scipy.find_peaks accepts a per-sample prominence array.
+    prominence_thresh = _rolling_window_threshold(
+        filtered, fs, fn=lambda x: float(np.std(x) * 0.5)
+    )
     peaks, _ = find_peaks(filtered, distance=min_distance, prominence=prominence_thresh)
     return peaks
 
