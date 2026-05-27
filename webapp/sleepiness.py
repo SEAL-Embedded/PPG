@@ -99,6 +99,11 @@ CAVEATS = [
     "missing beats short PPG segments produce, but Lomb-Scargle has different leakage "
     "behaviour than FFT-after-cubic-spline; numbers will not match an FFT pipeline beat-for-"
     "beat.",
+    "Absolute LF / HF band powers are reported in ms²·Hz (amplitude² integrated over "
+    "frequency), not ms² — scipy.signal.lombscargle(normalize=False) returns amplitude² in "
+    "ms², which the trapezoidal integration over the band's Hz axis multiplies by a band "
+    "width. The dimensionless ratios (lf_nu, hf_nu, log_lf_hf) are unaffected; they cancel "
+    "the bandwidth factor and are the SPI inputs that actually drive the index.",
     "Sample entropy is computed with m=2, r=0.2·SDNN (Richman & Moorman 2000). On series of "
     "fewer than ~100 intervals the estimator's variance is large; per-session SampEn from "
     "5-minute resting recordings is reported but should not be used to compare individuals.",
@@ -176,6 +181,15 @@ def _lomb_scargle_band_power(rr_ms, rr_times_s, band):
 
     Returns NaN if there are too few intervals, or the requested band has
     zero width / no frequency samples.
+
+    Units. ``scipy.signal.lombscargle(normalize=False)`` returns
+    amplitude² (in ms² because the input is RR in ms); integrating that
+    over a frequency axis in Hz gives band power in ms²·Hz (i.e.,
+    amplitude² integrated over frequency), not ms². The previous
+    docstring said ms² — wrong by a factor of band width. The downstream
+    SPI consumes only the dimensionless ratios (lf_nu, hf_nu, log_lf_hf)
+    which cancel the band-width factor, so this unit clarification is
+    documentation-only and does not change any numbers.
     """
     rr_ms = np.asarray(rr_ms, dtype=float)
     rr_times_s = np.asarray(rr_times_s, dtype=float)
@@ -199,8 +213,9 @@ def _lomb_scargle_band_power(rr_ms, rr_times_s, band):
     except Exception:
         return float("nan")
     # Integrate the periodogram across the band — trapezoidal rule on the
-    # freqs grid gives band power in (ms^2). Absolute value to be safe
-    # against tiny negative numerical noise on near-zero bins.
+    # freqs grid gives band power in ms²·Hz (amplitude² in ms² times the
+    # Hz axis of the integral). Absolute value to be safe against tiny
+    # negative numerical noise on near-zero bins.
     # numpy 2.0 renames np.trapz -> np.trapezoid; fall back for older numpy.
     _trap = getattr(np, "trapezoid", None) or np.trapz
     power = float(_trap(np.abs(pgram), freqs))

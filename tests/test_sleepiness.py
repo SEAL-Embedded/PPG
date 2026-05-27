@@ -131,6 +131,26 @@ class TestSampleEntropy:
         assert not np.isfinite(sleepiness._sample_entropy(np.array([1.0, 2.0])))
 
 
+# ── Lomb-Scargle units documentation (H3) ───────────────────────────────────
+
+class TestLombScargleUnitsDocstring:
+
+    def test_lomb_scargle_docstring_mentions_ms2_hz(self):
+        """Documentation honesty — the return is amplitude²·Hz, not amplitude².
+
+        scipy.signal.lombscargle(normalize=False) returns amplitude² in ms²
+        (since the input is RR in ms), and np.trapezoid integrates over a
+        frequency axis in Hz — so the integral has units ms²·Hz. The
+        original docstring claimed ms² which is off by the band width.
+        """
+        import inspect
+        src = inspect.getsource(sleepiness._lomb_scargle_band_power)
+        assert ("ms²·Hz" in src or "ms^2·Hz" in src or "ms^2*Hz" in src
+                or "amplitude² integrated over frequency" in src), (
+            "Lomb-Scargle docstring must clarify units are ms²·Hz, not ms²"
+        )
+
+
 # ── Sample entropy off-by-one (H2) ──────────────────────────────────────────
 
 class TestSampleEntropyOffByOne:
