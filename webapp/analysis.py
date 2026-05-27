@@ -55,6 +55,31 @@ CHANNEL_RE = re.compile(r".*ppg_data_ch(\d+)\.csv$")
 
 # ── Loaders (schema matches PPG_ECG_Full_Unpacking.py output) ────────────────
 
+def _unwrap_ticks_us(ts_us):
+    """Unwrap a MicroPython ticks_us series that may have wrapped at 2^30.
+
+    The Pi Pico's ``ticks_us()`` uses a 30-bit counter that wraps every
+    2^30 microseconds (~17.89 minutes). Any recording longer than that
+    will contain a backward jump in the CSV's first column that poisons
+    every diff-based downstream metric (``infer_fs``,
+    ``peaks_to_intervals``, etc.). This helper detects backward jumps
+    larger than 2^29 (half the wrap period — anything smaller is just
+    out-of-order jitter, not a wrap) and adds the wrap period to all
+    subsequent samples. Returns a monotone float64 array so a later
+    ``/ 1000.0`` to milliseconds keeps full precision.
+    """
+    arr = np.asarray(ts_us, dtype=np.float64)
+    if len(arr) < 2:
+        return arr
+    WRAP = float(1 << 30)
+    THRESH = float(1 << 29)
+    diffs = np.diff(arr)
+    # 1 where a wrap occurred, 0 elsewhere
+    wraps = (diffs < -THRESH).astype(np.float64)
+    offset = np.concatenate([[0.0], np.cumsum(wraps) * WRAP])
+    return arr + offset
+
+
 def load_ppg(path):
     """``ppg_data_ch{N}.csv`` — col0=ts_us, col1=sample (headerless).
 
@@ -66,7 +91,8 @@ def load_ppg(path):
     ts_us = pd.to_numeric(df["ts_us"], errors="coerce").to_numpy(dtype=float)
     sig = pd.to_numeric(df["sample"], errors="coerce").to_numpy(dtype=float)
     valid = ~(np.isnan(ts_us) | np.isnan(sig))
-    return ts_us[valid] / 1000.0, sig[valid]   # return ms, sample
+    ts_us_unwrapped = _unwrap_ticks_us(ts_us[valid])
+    return ts_us_unwrapped / 1000.0, sig[valid]   # return ms, sample
 
 
 def load_ecg(path):
