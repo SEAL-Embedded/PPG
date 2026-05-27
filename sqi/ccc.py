@@ -103,7 +103,7 @@ def detect_r_peaks(ecg, fs):
     Strategy:
       - Bandpass filter (0.5-40 Hz) to remove baseline wander
       - Auto-flip if the lead is inverted (|min| > max after centering)
-      - find_peaks with minimum distance = 0.4s (caps at ~150 BPM)
+      - find_peaks with minimum distance = 0.25s (caps at ~240 BPM)
         and height threshold derived from the 90th-percentile amplitude
 
     Parameters
@@ -120,7 +120,8 @@ def detect_r_peaks(ecg, fs):
     centered = filtered - np.mean(filtered)
     if np.abs(centered.min()) > centered.max():
         filtered = -filtered
-    min_distance  = int(0.4 * fs)         # minimum 400 ms between beats (~150 BPM max)
+    # 250 ms between beats -> 240 BPM ceiling (covers exercise + arrhythmia)
+    min_distance  = int(0.25 * fs)
     # Threshold must be computed AFTER the polarity flip so it reflects the
     # signal find_peaks actually sees.
     height_thresh = np.percentile(filtered, 90) * 0.5   # 50% of 90th percentile
@@ -134,7 +135,7 @@ def detect_ppg_peaks(ppg, fs):
 
     Strategy:
       - Paper-spec bandpass (0.5-4 Hz, 4th-order) via ``ppg_bandpass``
-      - find_peaks with minimum distance = 0.4s
+      - find_peaks with minimum distance = 0.25s (caps at ~240 BPM)
         and prominence threshold to reject small oscillations
 
     Parameters
@@ -147,7 +148,8 @@ def detect_ppg_peaks(ppg, fs):
     peaks : np.ndarray  -- sample indices of systolic peaks
     """
     filtered = ppg_bandpass(ppg, fs)
-    min_distance = int(0.4 * fs)
+    # 250 ms between beats -> 240 BPM ceiling (covers exercise + arrhythmia)
+    min_distance = int(0.25 * fs)
     prominence_thresh = np.std(filtered) * 0.5
     peaks, _ = find_peaks(filtered, distance=min_distance, prominence=prominence_thresh)
     return peaks

@@ -38,6 +38,14 @@ class TestFilterGuards:
 
 # ── PPG bandpass at paper spec (F1) ─────────────────────────────────────────
 
+class TestFastHrCeiling:
+    def test_detect_r_peaks_handles_180_bpm(self, synth_fast_hr_ecg):
+        peaks = detect_r_peaks(synth_fast_hr_ecg["ecg"], synth_fast_hr_ecg["fs"])
+        # 30 s x 180 BPM = 90 peaks. Allow +/-15 tolerance.
+        assert 75 <= len(peaks) <= 105, \
+            f"only {len(peaks)} peaks at 180 BPM — min_distance probably too high"
+
+
 class TestPpgBandpass:
     def test_ppg_bandpass_function_exists(self):
         from sqi import ccc
