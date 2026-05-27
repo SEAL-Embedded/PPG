@@ -155,6 +155,10 @@ def detect_r_peaks(ecg, fs):
     peaks : np.ndarray  -- sample indices of R-peaks
     """
     filtered = bandpass(ecg, fs, low=0.5, high=40.0)
+    # If the signal was too short for the bandpass guard, there's nothing
+    # to peak-detect — return empty so callers don't have to special-case it.
+    if filtered is None:
+        return np.array([], dtype=int)
     # Auto-detect polarity: if the negative excursion dominates, the lead is inverted.
     # Use trimmed extrema (top/bottom 0.5%) so a single huge spike or electrode
     # pop can't flip the whole recording.
@@ -192,6 +196,10 @@ def detect_ppg_peaks(ppg, fs):
     peaks : np.ndarray  -- sample indices of systolic peaks
     """
     filtered = ppg_bandpass(ppg, fs)
+    # If the signal was too short for the bandpass guard, there's nothing
+    # to peak-detect — return empty so callers don't have to special-case it.
+    if filtered is None:
+        return np.array([], dtype=int)
     # Auto-detect polarity: same trimmed-extrema test as detect_r_peaks so a
     # device that delivers an inverted photodiode signal (or a sign flip
     # elsewhere in the pipeline) still finds systolic peaks.
