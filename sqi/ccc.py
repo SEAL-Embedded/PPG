@@ -74,6 +74,26 @@ def lowpass(signal, fs, cutoff=8.0, order=2):
     return filtfilt(b, a, signal)
 
 
+def ppg_bandpass(sig, fs, low=0.5, high=4.0, order=4):
+    """Paper-spec PPG bandpass: 0.5-4.0 Hz, 4th-order zero-phase Butterworth.
+
+    This is the canonical PPG filter used for both peak detection and any
+    downstream display so consumers don't drift on filter parameters.
+    The 0.5 Hz HP strips baseline wander; the 4 Hz LP keeps the cardiac
+    fundamental (~1 Hz) and its first harmonic but rejects motion-band
+    energy and >5 Hz noise.
+
+    Returns ``None`` when the input is too short for ``filtfilt``.
+    """
+    sig = np.asarray(sig)
+    nyq = fs / 2.0
+    b, a = butter(order, [low / nyq, high / nyq], btype='band')
+    padlen = 3 * max(len(a), len(b))
+    if len(sig) <= padlen:
+        return None
+    return filtfilt(b, a, sig)
+
+
 # ── Peak detection ────────────────────────────────────────────────────────────
 
 def detect_r_peaks(ecg, fs):
