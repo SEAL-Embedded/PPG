@@ -115,8 +115,16 @@ def detect_r_peaks(ecg, fs):
     -------
     peaks : np.ndarray  -- sample indices of R-peaks
     """
+<<<<<<< HEAD
     #filtered = bandpass(ecg, fs, low=0.5, high=40.0)
     filtered = ecg
+=======
+    filtered = bandpass(ecg, fs, low=0.5, high=40.0)
+    # If the signal was too short for the bandpass guard, there's nothing
+    # to peak-detect — return empty so callers don't have to special-case it.
+    if filtered is None:
+        return np.array([], dtype=int)
+>>>>>>> e04c457 (fix(ccc): P3 followup: short-signal None propagates as empty peaks)
     # Auto-detect polarity: if the negative excursion dominates, the lead is inverted.
     centered = filtered - np.mean(filtered)
     if np.abs(centered.min()) > centered.max():
@@ -146,6 +154,10 @@ def detect_ppg_peaks(ppg, fs):
     peaks : np.ndarray  -- sample indices of systolic peaks
     """
     filtered = ppg_bandpass(ppg, fs)
+    # If the signal was too short for the bandpass guard, there's nothing
+    # to peak-detect — return empty so callers don't have to special-case it.
+    if filtered is None:
+        return np.array([], dtype=int)
     min_distance = int(0.4 * fs)
     prominence_thresh = np.std(filtered) * 0.5
     peaks, _ = find_peaks(filtered, distance=min_distance, prominence=prominence_thresh)
