@@ -107,27 +107,21 @@ def load_ecg(path):
     return ts_us_unwrapped / 1000.0, sig[valid], leads_off[valid].astype(int)
 
 
-def ppg_bandpass(sig, fs, lowcut=0.6, highcut=3.3, order=2):
-    """The cardiac bandpass ppgvis.py applies to PPG: zero-phase
-    Butterworth, 0.6-3.3 Hz, order 2 (signal_visualization/ppgvis.py
-    bandpass()). Filters the full-resolution signal so decimation
-    afterwards preserves the filtered waveform.
+def ppg_bandpass(sig, fs, lowcut=0.5, highcut=4.0, order=4):
+    """Cardiac bandpass overlay for the dashboard PPG view.
 
-    Returns None when the channel's fs/length can't support the filter
-    (NaN fs, cutoffs not below Nyquist, or too few samples for filtfilt)
-    so the front end can grey out that channel's checkbox.
+    Delegates to ``sqi.ccc.ppg_bandpass`` so the display overlay and the
+    PPG peak detector consume the same filtered waveform — peaks the user
+    sees on the dashboard are exactly the peaks the detector ran on.
+
+    The defaults match the paper spec (0.5–4.0 Hz, 4th-order zero-phase
+    Butterworth). The legacy 0.6–3.3 Hz / order-2 path was retired with
+    the rest of the signal-processing cleanup; the kwargs are preserved
+    so any external caller passing them keeps the same parameter
+    semantics.
     """
-    if not np.isfinite(fs) or fs <= 0:
-        return None
-    nyq = 0.5 * fs
-    low, high = lowcut / nyq, highcut / nyq
-    if not (0.0 < low < high < 1.0):
-        return None
-    b, a = butter(order, [low, high], btype="band")
-    # filtfilt's default padlen is 3*max(len(a),len(b)); guard short signals.
-    if len(sig) <= 3 * max(len(a), len(b)):
-        return None
-    return filtfilt(b, a, sig)
+    from sqi.ccc import ppg_bandpass as _ccc_ppg_bandpass
+    return _ccc_ppg_bandpass(sig, fs, low=lowcut, high=highcut, order=order)
 
 
 def infer_fs(ts_ms):
