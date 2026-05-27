@@ -83,11 +83,19 @@ def ppg_bandpass(sig, fs, low=0.5, high=4.0, order=4):
     fundamental (~1 Hz) and its first harmonic but rejects motion-band
     energy and >5 Hz noise.
 
-    Returns ``None`` when the input is too short for ``filtfilt``.
+    Returns ``None`` when the filter can't be constructed for this
+    channel — invalid fs, cutoffs outside the (0, Nyquist) range, or a
+    signal shorter than ``filtfilt``'s padlen. Callers (display overlay,
+    peak detector) use the None return to grey out / skip the channel.
     """
     sig = np.asarray(sig)
+    if not np.isfinite(fs) or fs <= 0:
+        return None
     nyq = fs / 2.0
-    b, a = butter(order, [low / nyq, high / nyq], btype='band')
+    low_norm, high_norm = low / nyq, high / nyq
+    if not (0.0 < low_norm < high_norm < 1.0):
+        return None
+    b, a = butter(order, [low_norm, high_norm], btype='band')
     padlen = 3 * max(len(a), len(b))
     if len(sig) <= padlen:
         return None
