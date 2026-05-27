@@ -388,3 +388,12 @@ class TestParticipantMetadata:
         })
         loaded = sessions.load_participant_metadata(name)
         assert loaded["notes"] == "sleep-deprived volunteer"
+
+    def test_save_metadata_overrides_notes_when_non_blank_payload_arrives(
+        self, isolated_sessions_root, synth_session
+    ):
+        name, _, _ = synth_session
+        sessions.save_participant_metadata(name, {"notes": "first"})
+        sessions.save_participant_metadata(name, {"notes": "second"})
+        loaded = sessions.load_participant_metadata(name)
+        assert loaded["notes"] == "second"
