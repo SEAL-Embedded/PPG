@@ -38,6 +38,7 @@ from sqi.ccc import (
 )
 from sqi.SSQI_algorithm import Ssqi
 from sqi.zcr_sqi import windowed_zcr
+from sqi.hrv_clean import clean_intervals
 
 from . import sessions
 
@@ -837,15 +838,26 @@ def analyze_channel(ppg_ts_ms, ppg_sig, ecg_ts_ms, ecg_sig, t0_ms=0.0,
         if ppg_dur_s > 0 and len(ppg_peaks):
             result["mean_hr_bpm"] = float(60.0 * len(ppg_peaks) / ppg_dur_s)
 
-        # Per-channel SDNN (ms) — sample std of the full PPI series; same
+        # Manuscript §2.5: ectopic + outlier rejection on the PP series
+        # before HRV metric extraction. [300, 2000] ms physiological range
+        # gate + Karlsson 1987 ±20% local-median rule (sqi/hrv_clean.py).
+        # The raw ``ppi_ms`` is preserved for the per-RR CCC pipeline so
+        # the matched-beat agreement still reflects detector behaviour.
+        if len(ppi_ms):
+            ppi_clean_ms, _, _ = clean_intervals(ppi_ms, ppi_times)
+        else:
+            ppi_clean_ms = ppi_ms
+
+        # Per-channel SDNN (ms) — sample std of the cleaned NN series; same
         # definition the ECG side uses, so the cross-session SDNN-agreement
         # aggregator can pair them directly.
-        if len(ppi_ms) >= 2:
-            result["sdnn_ms"] = float(np.std(ppi_ms, ddof=1))
+        if len(ppi_clean_ms) >= 2:
+            result["sdnn_ms"] = float(np.std(ppi_clean_ms, ddof=1))
 
-        # Per-channel frequency-domain HRV (pyhrv welch_psd) on the same
-        # full PPI series. Matches old/PPGanalysis.py's LF/HF computation.
-        ppg_fd = _freq_domain_metrics(ppi_ms)
+        # Per-channel frequency-domain HRV (pyhrv welch_psd) on the cleaned
+        # NN series. Matches manuscript §2.6 (Lomb-Scargle / Welch on NN,
+        # not RR).
+        ppg_fd = _freq_domain_metrics(ppi_clean_ms)
         result["vlf_power_ms2"] = ppg_fd["vlf_power_ms2"]
         result["lf_power_ms2"]  = ppg_fd["lf_power_ms2"]
         result["hf_power_ms2"]  = ppg_fd["hf_power_ms2"]
@@ -926,13 +938,20 @@ def analyze_session(name, start_s=None, end_s=None):
     mean_hr = (60.0 * len(ecg_peaks) / duration_s) if (duration_s > 0 and len(ecg_peaks)) else float("nan")
 
     # ECG SDNN (ms) — same definition as Task Force 1996; sample std (ddof=1)
-    # of the RR intervals over the cropped window. Used as the reference
+    # of the NN intervals over the cropped window. Used as the reference
     # value for the SDNN-agreement aggregator.
-    ecg_rr_ms = np.diff(ecg_ts_ms[ecg_peaks]) if len(ecg_peaks) >= 2 else np.array([], dtype=float)
-    ecg_sdnn_ms = float(np.std(ecg_rr_ms, ddof=1)) if len(ecg_rr_ms) >= 2 else float("nan")
+    if len(ecg_peaks) >= 2:
+        ecg_rr_ms = np.diff(ecg_ts_ms[ecg_peaks])
+        ecg_rr_t_s = ecg_ts_ms[ecg_peaks][1:] / 1000.0
+        # Manuscript §2.5: ectopic + outlier rejection on RR before metric
+        # extraction. Range gate + Karlsson 1987 ±20% rule (sqi/hrv_clean.py).
+        ecg_nn_ms, _, _ = clean_intervals(ecg_rr_ms, ecg_rr_t_s)
+    else:
+        ecg_nn_ms = np.array([], dtype=float)
+    ecg_sdnn_ms = float(np.std(ecg_nn_ms, ddof=1)) if len(ecg_nn_ms) >= 2 else float("nan")
 
     # ECG frequency-domain HRV via pyhrv (matches old/PPGanalysis.py).
-    ecg_fd = _freq_domain_metrics(ecg_rr_ms)
+    ecg_fd = _freq_domain_metrics(ecg_nn_ms)
 
     ecg_info = {
         "fs_hz": ecg_fs,
