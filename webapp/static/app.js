@@ -105,6 +105,10 @@ window.addEventListener("DOMContentLoaded", () => {
     btn.addEventListener("click", () => toggleSidebar(parseInt(btn.dataset.col, 10)));
   });
 
+  // ECG detailed-view modal (full-resolution ECGvis-style plot + R-peaks)
+  $("btn-ecg-detail").onclick = openEcgDetail;
+  $("ecg-detail-close").onclick = closeEcgDetail;
+
   // Receiver-log modal
   $("btn-receiver-log").onclick = openReceiverLog;
   $("recv-log-close").onclick = () => closeModal("recv-log-modal");
@@ -134,7 +138,8 @@ window.addEventListener("DOMContentLoaded", () => {
   };
 
   // Wire all modals with backdrop-click + Escape via the central helper.
-  ["delete-modal", "recv-log-modal", "batch-archive-modal", "onb-modal"].forEach(wireModal);
+  ["delete-modal", "recv-log-modal", "batch-archive-modal", "onb-modal",
+   "ecg-detail-modal"].forEach(wireModal);
   document.addEventListener("keydown", onGlobalKeydown);
 
   // First-launch onboarding
@@ -487,7 +492,7 @@ async function loadSessionFull(name) {
   $("analysis-status").textContent = "loading…";
   setStatus("analyzing", "analyzing");
   const w = windowQS();
-  const sigP = fetch(`/api/sessions/${name}/signals?max_points=4500${w}`).then(r => r.json());
+  const sigP = fetch(`/api/sessions/${name}/signals?max_points=25000${w}`).then(r => r.json());
   const anaP = fetch(`/api/sessions/${name}/analyze?${w.slice(1)}`, {method:"POST"}).then(r => r.json());
 
   const [sig, ana] = await Promise.all([
@@ -509,7 +514,7 @@ async function loadSignals(name) {
   if (!name) return;
   try {
     state.signals = await fetch(
-      `/api/sessions/${name}/signals?max_points=4500${windowQS()}`
+      `/api/sessions/${name}/signals?max_points=25000${windowQS()}`
     ).then(r => r.json());
     renderECGBlock();
     renderPPGBlock();
@@ -572,6 +577,7 @@ function renderEverything() {
   renderPPGBlock();
   renderSessionInterpretation();
   renderSQITable();
+  renderHrvCompareTable();
   renderBlandAltmanGrid();
 }
 
@@ -627,6 +633,8 @@ function renderECGBlock() {
                  `${fmtFs(ecg.fs_hz)}`];
   if (ana?.n_peaks) parts.push(`${ana.n_peaks} R-peaks`);
   if (ana?.mean_hr_bpm) parts.push(`HR ${ana.mean_hr_bpm.toFixed(0)} bpm`);
+  if (isFinite(ana?.sdnn_ms)) parts.push(`SDNN ${ana.sdnn_ms.toFixed(1)} ms`);
+  if (isFinite(ana?.lf_hf_ratio)) parts.push(`LF/HF ${ana.lf_hf_ratio.toFixed(2)}`);
   if (ana?.leads_off_samples) parts.push(`${ana.leads_off_samples} leads-off`);
   $("ecg-summary").textContent = parts.join("  ·  ");
 
@@ -667,6 +675,82 @@ function renderECGBlock() {
 
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   ECG DETAILED VIEW — full-resolution popup (ECGvis.py-style) with R-peaks
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+async function openEcgDetail() {
+  const name = state.selectedSession;
+  if (!name) return;
+  $("ecg-detail-title").textContent = `ECG — ${name}`;
+  $("ecg-detail-meta").textContent = "loading full-resolution ECG…";
+  // Open first: the plot div has no dimensions while the modal is
+  // display:none, and Plotly can't size a hidden container.
+  openModal("ecg-detail-modal");
+  let d;
+  try {
+    d = await fetch(`/api/sessions/${name}/ecg_detail?${windowQS().slice(1)}`)
+      .then(r => r.json());
+  } catch (e) {
+    $("ecg-detail-meta").textContent = "load failed: " + e.message;
+    return;
+  }
+  if (!d || d.error) {
+    $("ecg-detail-meta").textContent = d?.error || "no ECG for this session";
+    return;
+  }
+  renderEcgDetail(d);
+}
+
+function renderEcgDetail(d) {
+  const meta = [`${d.n_samples.toLocaleString()} samples (full resolution)`,
+                fmtFs(d.fs_hz),
+                `${d.n_peaks} R-peaks`];
+  if (isFinite(d.mean_hr_bpm)) meta.push(`HR ${d.mean_hr_bpm.toFixed(0)} bpm`);
+  $("ecg-detail-meta").textContent = meta.join("  ·  ");
+
+  const traces = [{
+    x: d.time_s, y: d.signal,
+    type: "scatter", mode: "lines",
+    line: { width: 1, color: C.ecg },
+    name: "ECG",
+    hovertemplate: "%{x:.3f}s · %{y:.0f}<extra></extra>",
+  }];
+  // Peaks come straight from detect_r_peaks at their true sample values —
+  // no interpolation needed since this trace is full resolution.
+  if (d.peak_times_s?.length) {
+    traces.push({
+      x: d.peak_times_s, y: d.peak_values,
+      type: "scatter", mode: "markers",
+      marker: { size: 6, color: "#fff", line: { color: C.ecg, width: 1.5 } },
+      name: "R-peaks",
+      hovertemplate: "R-peak @ %{x:.3f}s<extra></extra>",
+    });
+  }
+  const shapes = (d.leads_off_spans || []).map(([a, b]) => ({
+    type: "rect", xref: "x", yref: "paper",
+    x0: a, x1: b, y0: 0, y1: 1,
+    fillcolor: C.ecgSoft, line: { width: 0 },
+  }));
+
+  const el = $("ecg-detail-plot");
+  try { Plotly.purge(el); } catch {}
+  Plotly.newPlot(el, traces, {
+    ...PLOT_BASE,
+    showlegend: true,
+    legend: { orientation: "h", x: 0, y: 1.06, font: { size: 11 } },
+    xaxis: axisStyle({ title: "time (s)", showticks: true }),
+    yaxis: axisStyle({ title: "ECG (ADC)", showticks: true }),
+    shapes,
+  }, PLOT_CFG);
+}
+
+function closeEcgDetail() {
+  try { Plotly.purge($("ecg-detail-plot")); } catch {}
+  closeModal("ecg-detail-modal");
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
    PPG CHANNEL CARDS
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -695,15 +779,30 @@ function renderPPGBlock() {
   const anyBpAble = chans.some(c => c.signal_bp);
   $("btn-bp-all").classList.toggle("hidden", !anyBpAble);
 
+  // Per-channel analysis row (peak count, mean HR) — only present once
+  // /analyze has returned. Until then this map is empty and the badge
+  // renders as a dashed placeholder.
+  const anaByCh = new Map();
+  (state.analysis?.results || []).forEach(r => anaByCh.set(r.channel, r));
+
   grid.innerHTML = chans.map(c => {
     const able = !!c.signal_bp;
     const on = able && state.bpChannels.has(c.channel);
+    const ar = anaByCh.get(c.channel);
+    const nPeaks = ar?.ppg_peak_times_s?.length ?? null;
+    const hr = ar?.mean_hr_bpm;
+    const sdnn = ar?.sdnn_ms;
+    const lfhf = ar?.lf_hf_ratio;
+    const peakBadge = nPeaks != null
+      ? `<span class="meta">${nPeaks} peaks${isFinite(hr) ? ` · ${hr.toFixed(0)} bpm` : ""}${isFinite(sdnn) ? ` · SDNN ${sdnn.toFixed(1)} ms` : ""}${isFinite(lfhf) ? ` · LF/HF ${lfhf.toFixed(2)}` : ""}</span>`
+      : `<span class="meta muted">— peaks</span>`;
     return `
     <div class="ppg-card">
       <div class="pcap">
         <span class="name">CH${c.channel}</span>
         <span class="site">${sites[c.channel] || "—"}</span>
         <span class="meta">${c.n_samples.toLocaleString()} @ ${fmtFs(c.fs_hz)}</span>
+        ${peakBadge}
         <label class="bp-toggle${able ? "" : " disabled"}">
           <input type="checkbox" class="bp-cb" data-ch="${c.channel}"
                  ${on ? "checked" : ""} ${able ? "" : "disabled"}> bandpass
@@ -1218,6 +1317,9 @@ async function runBatchAnalysis(showBusy) {
   renderBatchMeta(payload);
   renderBatchInterpretation(payload);
   renderBatchPerSite(payload);
+  renderBatchHrAgreement(payload);
+  renderBatchSdnnAgreement(payload);
+  renderBatchLfhfAgreement(payload);
   renderBatchPerChannel(payload);
   refreshBatchArchives();  // a fresh run added one to the archive
 }
@@ -1338,6 +1440,212 @@ function sortBatchSite(colIdx) {
   else state.batchSiteSort = { col: null, dir: 1 };
   if (state.batch) renderBatchPerSite(state.batch);
 }
+
+// Per-session HRV metric comparison — one row per PPG channel, showing
+// entire-session HR / SDNN / LF/HF next to the ECG reference value with
+// a Δ column for each. No CCC/ICC/Bland-Altman within session (those need
+// >1 paired observation per channel; here each channel contributes one
+// number per metric). The full agreement statistics live in the batch view.
+function renderHrvCompareTable() {
+  const block = $("hrv-compare-block");
+  const tbl = $("hrv-compare-table");
+  const rows = (state.analysis?.results || []);
+  const ecg = state.analysis?.ecg || {};
+
+  if (!rows.length) {
+    block.classList.add("hidden");
+    tbl.innerHTML = "";
+    $("hrv-compare-summary").textContent = "";
+    return;
+  }
+  block.classList.remove("hidden");
+
+  const ecgHR = ecg.mean_hr_bpm, ecgSDNN = ecg.sdnn_ms, ecgLFHF = ecg.lf_hf_ratio;
+  const parts = [];
+  if (isFinite(ecgHR))   parts.push(`ECG HR ${ecgHR.toFixed(1)} bpm`);
+  if (isFinite(ecgSDNN)) parts.push(`SDNN ${ecgSDNN.toFixed(1)} ms`);
+  if (isFinite(ecgLFHF)) parts.push(`LF/HF ${ecgLFHF.toFixed(2)}`);
+  $("hrv-compare-summary").textContent = parts.join("  ·  ");
+
+  const f  = (v, d=2) => (v == null || !isFinite(v)) ? "—" : (+v).toFixed(d);
+  const f1 = v => f(v, 1);
+  const f2 = v => f(v, 2);
+  const sign = v => (v == null || !isFinite(v)) ? "—" : (v >= 0 ? "+" : "") + (+v).toFixed(2);
+
+  let html = `<thead><tr>
+    <th>Ch</th><th>Site</th>
+    <th>ECG HR (bpm)</th><th>PPG HR (bpm)</th><th>ΔHR (bpm)</th>
+    <th>ECG SDNN (ms)</th><th>PPG SDNN (ms)</th><th>ΔSDNN (ms)</th>
+    <th>ECG LF/HF</th><th>PPG LF/HF</th><th>ΔLF/HF</th>
+  </tr></thead><tbody>`;
+
+  const sites = state.sessionDetail?.participant?.channel_sites || {};
+  for (const r of rows) {
+    const hr = r.mean_hr_bpm, sdnn = r.sdnn_ms, lfhf = r.lf_hf_ratio;
+    const dHR   = (isFinite(hr) && isFinite(ecgHR))     ? hr - ecgHR     : NaN;
+    const dSDNN = (isFinite(sdnn) && isFinite(ecgSDNN)) ? sdnn - ecgSDNN : NaN;
+    const dLFHF = (isFinite(lfhf) && isFinite(ecgLFHF)) ? lfhf - ecgLFHF : NaN;
+    html += `<tr>
+      <td class="mono">ch${r.channel}</td>
+      <td>${sites[r.channel] || r.site || "—"}</td>
+      <td class="mono">${f1(ecgHR)}</td>
+      <td class="mono">${f1(hr)}</td>
+      <td class="mono">${sign(dHR)}</td>
+      <td class="mono">${f1(ecgSDNN)}</td>
+      <td class="mono">${f1(sdnn)}</td>
+      <td class="mono">${sign(dSDNN)}</td>
+      <td class="mono">${f2(ecgLFHF)}</td>
+      <td class="mono">${f2(lfhf)}</td>
+      <td class="mono">${sign(dLFHF)}</td>
+    </tr>`;
+  }
+  html += `</tbody>`;
+  tbl.innerHTML = html;
+}
+
+
+function renderBatchHrAgreement(p) {
+  const tbl = $("batch-hr-table");
+  const rows = (p && p.hr_per_channel) || [];
+  $("batch-hr-summary").textContent = rows.length
+    ? `${rows.length} channels · CCC/ICC/Bland-Altman on per-session mean HR`
+    : "";
+
+  let html = `<thead><tr>
+    <th>Ch</th><th>Site</th><th>n</th>
+    <th>ECG HR (bpm)</th><th>PPG HR (bpm)</th>
+    <th>CCC</th><th>ICC (95% CI)</th><th>Pearson</th>
+    <th>Bias (bpm)</th><th>LOA± (bpm)</th>
+    <th>RMSE / MAE (bpm)</th>
+  </tr></thead><tbody>`;
+  if (!rows.length) {
+    html += `<tr><td colspan="11" class="muted">no HR data — run a batch first</td></tr>`;
+  }
+  const f = (v, d=3) => (v == null || !isFinite(v)) ? "—" : (+v).toFixed(d);
+  const f1 = v => f(v, 1);
+  const f2 = v => f(v, 2);
+  for (const r of rows) {
+    const cccCls = gradeCCC(r.ccc);
+    const iccCls = gradeCCC(r.icc);
+    const iccCi = (isFinite(r.icc_ci_low) && isFinite(r.icc_ci_high))
+      ? `<span class="muted mono">[${f(r.icc_ci_low)}, ${f(r.icc_ci_high)}]</span>`
+      : "";
+    const loa = (isFinite(r.loa_lower_bpm) && isFinite(r.loa_upper_bpm))
+      ? `[${f2(r.loa_lower_bpm)}, ${f2(r.loa_upper_bpm)}]`
+      : "—";
+    html += `<tr>
+      <td class="mono">ch${r.channel}</td>
+      <td>${r.site || "—"}</td>
+      <td class="mono">${r.n_sessions}</td>
+      <td class="mono">${f1(r.mean_hr_ecg_bpm)}</td>
+      <td class="mono">${f1(r.mean_hr_ppg_bpm)}</td>
+      <td class="mono ${cccCls}">${f(r.ccc)}</td>
+      <td class="mono ${iccCls}">${f(r.icc)} ${iccCi}</td>
+      <td class="mono">${f(r.pearson_r)}</td>
+      <td class="mono">${f2(r.bias_bpm)}</td>
+      <td class="mono">${loa}</td>
+      <td class="mono">${f2(r.rmse_bpm)} / ${f2(r.mae_bpm)}</td>
+    </tr>`;
+  }
+  html += `</tbody>`;
+  tbl.innerHTML = html;
+}
+
+
+function renderBatchSdnnAgreement(p) {
+  const tbl = $("batch-sdnn-table");
+  const rows = (p && p.sdnn_per_channel) || [];
+  $("batch-sdnn-summary").textContent = rows.length
+    ? `${rows.length} channels · CCC/ICC/Bland-Altman on per-session SDNN`
+    : "";
+
+  let html = `<thead><tr>
+    <th>Ch</th><th>Site</th><th>n</th>
+    <th>ECG SDNN (ms)</th><th>PPG SDNN (ms)</th>
+    <th>CCC</th><th>ICC (95% CI)</th><th>Pearson</th>
+    <th>Bias (ms)</th><th>LOA± (ms)</th>
+    <th>RMSE / MAE (ms)</th>
+  </tr></thead><tbody>`;
+  if (!rows.length) {
+    html += `<tr><td colspan="11" class="muted">no SDNN data — run a batch first</td></tr>`;
+  }
+  const f = (v, d=3) => (v == null || !isFinite(v)) ? "—" : (+v).toFixed(d);
+  const f1 = v => f(v, 1);
+  const f2 = v => f(v, 2);
+  for (const r of rows) {
+    const cccCls = gradeCCC(r.ccc);
+    const iccCls = gradeCCC(r.icc);
+    const iccCi = (isFinite(r.icc_ci_low) && isFinite(r.icc_ci_high))
+      ? `<span class="muted mono">[${f(r.icc_ci_low)}, ${f(r.icc_ci_high)}]</span>`
+      : "";
+    const loa = (isFinite(r.loa_lower_ms) && isFinite(r.loa_upper_ms))
+      ? `[${f2(r.loa_lower_ms)}, ${f2(r.loa_upper_ms)}]`
+      : "—";
+    html += `<tr>
+      <td class="mono">ch${r.channel}</td>
+      <td>${r.site || "—"}</td>
+      <td class="mono">${r.n_sessions}</td>
+      <td class="mono">${f1(r.mean_sdnn_ecg_ms)}</td>
+      <td class="mono">${f1(r.mean_sdnn_ppg_ms)}</td>
+      <td class="mono ${cccCls}">${f(r.ccc)}</td>
+      <td class="mono ${iccCls}">${f(r.icc)} ${iccCi}</td>
+      <td class="mono">${f(r.pearson_r)}</td>
+      <td class="mono">${f2(r.bias_ms)}</td>
+      <td class="mono">${loa}</td>
+      <td class="mono">${f2(r.rmse_ms)} / ${f2(r.mae_ms)}</td>
+    </tr>`;
+  }
+  html += `</tbody>`;
+  tbl.innerHTML = html;
+}
+
+
+function renderBatchLfhfAgreement(p) {
+  const tbl = $("batch-lfhf-table");
+  const rows = (p && p.lfhf_per_channel) || [];
+  $("batch-lfhf-summary").textContent = rows.length
+    ? `${rows.length} channels · CCC/ICC/Bland-Altman on per-session LF/HF (pyhrv welch_psd)`
+    : "";
+
+  let html = `<thead><tr>
+    <th>Ch</th><th>Site</th><th>n</th>
+    <th>ECG LF/HF</th><th>PPG LF/HF</th>
+    <th>CCC</th><th>ICC (95% CI)</th><th>Pearson</th>
+    <th>Bias</th><th>LOA±</th>
+    <th>RMSE / MAE</th>
+  </tr></thead><tbody>`;
+  if (!rows.length) {
+    html += `<tr><td colspan="11" class="muted">no LF/HF data — run a batch first</td></tr>`;
+  }
+  const f = (v, d=3) => (v == null || !isFinite(v)) ? "—" : (+v).toFixed(d);
+  const f2 = v => f(v, 2);
+  for (const r of rows) {
+    const cccCls = gradeCCC(r.ccc);
+    const iccCls = gradeCCC(r.icc);
+    const iccCi = (isFinite(r.icc_ci_low) && isFinite(r.icc_ci_high))
+      ? `<span class="muted mono">[${f(r.icc_ci_low)}, ${f(r.icc_ci_high)}]</span>`
+      : "";
+    const loa = (isFinite(r.loa_lower) && isFinite(r.loa_upper))
+      ? `[${f(r.loa_lower)}, ${f(r.loa_upper)}]`
+      : "—";
+    html += `<tr>
+      <td class="mono">ch${r.channel}</td>
+      <td>${r.site || "—"}</td>
+      <td class="mono">${r.n_sessions}</td>
+      <td class="mono">${f2(r.mean_lfhf_ecg)}</td>
+      <td class="mono">${f2(r.mean_lfhf_ppg)}</td>
+      <td class="mono ${cccCls}">${f(r.ccc)}</td>
+      <td class="mono ${iccCls}">${f(r.icc)} ${iccCi}</td>
+      <td class="mono">${f(r.pearson_r)}</td>
+      <td class="mono">${f(r.bias)}</td>
+      <td class="mono">${loa}</td>
+      <td class="mono">${f(r.rmse)} / ${f(r.mae)}</td>
+    </tr>`;
+  }
+  html += `</tbody>`;
+  tbl.innerHTML = html;
+}
+
 
 function renderBatchPerChannel(p) {
   const tbl = $("batch-per-channel-table");
@@ -1753,6 +2061,9 @@ async function loadBatchFromArchive(batchId) {
   renderBatchMeta(payload);
   renderBatchInterpretation(payload);
   renderBatchPerSite(payload);
+  renderBatchHrAgreement(payload);
+  renderBatchSdnnAgreement(payload);
+  renderBatchLfhfAgreement(payload);
   renderBatchPerChannel(payload);
 }
 

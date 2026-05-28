@@ -107,13 +107,22 @@ def delete_session(name: str):
 
 
 @app.get("/api/sessions/{name}/signals")
-def get_signals(name: str, max_points: int = 5000, tail_seconds: Optional[float] = None,
+def get_signals(name: str, max_points: int = 25000, tail_seconds: Optional[float] = None,
                 start_s: Optional[float] = None, end_s: Optional[float] = None):
     _require_session(name)
     return analysis.load_session_signals(
         name, max_points=max_points, tail_seconds=tail_seconds,
         start_s=start_s, end_s=end_s,
     )
+
+
+@app.get("/api/sessions/{name}/ecg_detail")
+def get_ecg_detail(name: str, start_s: Optional[float] = None,
+                   end_s: Optional[float] = None):
+    _require_session(name)
+    # NaN (mean_hr with no peaks) isn't JSON-compliant under allow_nan=False.
+    return sessions._coerce_jsonable(
+        analysis.ecg_detail(name, start_s=start_s, end_s=end_s))
 
 
 def _compact_analysis_summary(result):
@@ -159,7 +168,10 @@ def analyze_session(name: str, start_s: Optional[float] = None,
     _require_session(name)
     result = analysis.analyze_session(name, start_s=start_s, end_s=end_s)
     _persist_session_analysis(name, result, start_s, end_s)
-    return result
+    # NaN (e.g. stats.icc with no pingouin / <4 matched beats) is not JSON
+    # compliant under Starlette's allow_nan=False; coerce to null like the
+    # sleepiness endpoints do.
+    return sessions._coerce_jsonable(result)
 
 
 # Batch over every session_*/ folder under MDPIdata/. Same crop window
@@ -184,7 +196,7 @@ def analyze_all(start_s: Optional[float] = None, end_s: Optional[float] = None):
             "session_position": i,
             "total": total,
         })
-    return result
+    return sessions._coerce_jsonable(result)
 
 
 # ── Persistence read endpoints ───────────────────────────────────────────────

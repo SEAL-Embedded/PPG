@@ -78,13 +78,14 @@ def detect_r_peaks(ecg, fs):
     -------
     peaks : np.ndarray  -- sample indices of R-peaks
     """
-    filtered = bandpass(ecg, fs, low=0.5, high=40.0)
+    #filtered = bandpass(ecg, fs, low=0.5, high=40.0)
+    filtered = ecg
     # Auto-detect polarity: if the negative excursion dominates, the lead is inverted.
     centered = filtered - np.mean(filtered)
     if np.abs(centered.min()) > centered.max():
         filtered = -filtered
-    min_distance  = int(0.4 * fs)         # minimum 400 ms between beats (~150 BPM max)
-    height_thresh = np.percentile(filtered, 90) * 0.5   # 50% of 90th percentile
+    min_distance  = int(0.22 * fs)         # minimum 300 ms between beats (~200 BPM max)
+    height_thresh = np.percentile(filtered, 90) * 1.25   # 50% of 90th percentile
     peaks, _ = find_peaks(filtered, distance=min_distance, height=height_thresh)
     return peaks
 

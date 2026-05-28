@@ -24,13 +24,13 @@ import re
 
 import numpy as np
 import pandas as pd
-from scipy.signal import butter, filtfilt
+from scipy.interpolate import interp1d
+from scipy.signal import butter, filtfilt, find_peaks
 
 from sqi.ccc import (
     bandpass,
     ccc_label,
     compute_ccc,
-    detect_ppg_peaks,
     detect_r_peaks,
     lowpass,
     match_intervals,
@@ -48,6 +48,15 @@ try:
     import pingouin as _pg
 except Exception:        # pragma: no cover — package optional
     _pg = None
+
+# pyhrv backs the frequency-domain metrics (LF / HF / LF-HF ratio) the same
+# way old/PPGanalysis.py did — Welch PSD on cubic-spline-resampled NN, with
+# Task Force 1996 band definitions. Lazy-guarded so a missing install just
+# gives NaN powers rather than crashing analyze_session.
+try:
+    from pyhrv.frequency_domain import welch_psd as _pyhrv_welch_psd
+except Exception:        # pragma: no cover — package optional
+    _pyhrv_welch_psd = None
 
 
 CHANNEL_RE = re.compile(r".*ppg_data_ch(\d+)\.csv$")
@@ -108,6 +117,330 @@ def infer_fs(ts_ms):
         return float("nan")
     dt = float(np.median(np.diff(ts_ms)))
     return 1000.0 / dt if dt > 0 else float("nan")
+
+
+# ── Hybrid PPG conditioning + peak detection ─────────────────────────────────
+#
+# This mirrors the signal conditioning in signal_visualization/ppgvis.py
+# (drop non-monotonic timestamps -> cubic resample onto a uniform grid ->
+# rolling-median outlier removal -> 0.6-3.3 Hz bandpass before peak
+# detection) but keeps two things from the original detector that are
+# better on this rig's raw-ADC data: a *scale-relative* prominence
+# (ppgvis's absolute prominence=1.1 is ~0 on counts-in-the-thousands), and
+# interval timing off the *recorded* timestamps rather than the resample
+# grid. SSQI is deliberately NOT computed on the bandpassed signal — the
+# 3.3 Hz cut flattens the pulse toward a sinusoid and washes the skew out.
+
+def _drop_non_monotonic(ts_ms, sig):
+    """Drop samples whose timestamp doesn't strictly exceed the running max.
+
+    The drain-all firmware back-dates burst samples, so a channel's
+    timestamps can step backward mid-stream; left in, interp1d rejects the
+    duplicate/decreasing x and peaks_to_intervals can emit a negative PPI.
+    """
+    if len(ts_ms) < 2:
+        return ts_ms, sig
+    running_max = np.maximum.accumulate(ts_ms)
+    keep = np.empty(len(ts_ms), dtype=bool)
+    keep[0] = True
+    keep[1:] = ts_ms[1:] > running_max[:-1]
+    return ts_ms[keep], sig[keep]
+
+
+def _resample_uniform(ts_ms, sig, fs):
+    """Cubic-resample (ts_ms, sig) onto a uniform grid at ``fs`` Hz.
+
+    Returns ``(grid_ts_ms, grid_sig)``. Falls back to the input unchanged
+    when fs is unusable or there are too few points for a cubic spline —
+    so a degenerate channel still flows through the rest of the pipeline.
+    """
+    if not np.isfinite(fs) or fs <= 0 or len(ts_ms) < 4:
+        return ts_ms, sig
+    t0, t1 = float(ts_ms[0]), float(ts_ms[-1])
+    n = int(np.ceil((t1 - t0) / 1000.0 * fs))
+    if n < 2:
+        return ts_ms, sig
+    grid = np.linspace(t0, t1, n)
+    interp = interp1d(ts_ms, sig, kind="cubic", fill_value="extrapolate")
+    return grid, interp(grid)
+
+
+def _remove_outliers(sig, window=15, n_sigma=4.25):
+    """ppgvis's outlier scrub: flag samples that sit > n_sigma from a
+    centered rolling median, replace them by linear interpolation across
+    the good neighbours. Operates on the (uniform) sample index, so it's
+    meant to run after _resample_uniform."""
+    if len(sig) < 3:
+        return sig
+    s = pd.Series(sig)
+    med = s.rolling(window=window, center=True, min_periods=1).median()
+    gap = (med - s).abs()
+    thr = n_sigma * float(np.std(gap.to_numpy()))
+    if not np.isfinite(thr) or thr <= 0:
+        return sig
+    outliers = (gap > thr).to_numpy()
+    if not outliers.any() or outliers.all():
+        return sig
+    out = np.asarray(sig, dtype=float).copy()
+    idx = np.arange(len(out))
+    out[outliers] = np.interp(idx[outliers], idx[~outliers], out[~outliers])
+    return out
+
+
+def detect_ppg_peaks_bp(sig, fs):
+    """0.6-3.3 Hz bandpass (ppg_bandpass) then find_peaks with a
+    scale-relative prominence (0.5·std of the bandpassed signal) and a
+    0.4·fs minimum spacing (~150 bpm cap). Returns indices into ``sig``."""
+    bp = ppg_bandpass(sig, fs)
+    if bp is None:
+        return np.array([], dtype=int)
+    prominence = 0.5 * float(np.std(bp))
+    if not np.isfinite(prominence) or prominence <= 0:
+        return np.array([], dtype=int)
+    distance = max(1, int(0.4 * fs))
+    peaks, _ = find_peaks(bp, distance=distance, prominence=prominence)
+    return peaks
+
+
+def _grid_peaks_to_orig(grid_peaks, grid_ts_ms, orig_ts_ms):
+    """Map peak indices on the uniform grid back to the nearest *recorded*
+    sample index, so peaks_to_intervals diffs true timestamps instead of
+    the evenly-spaced grid. Returns sorted, unique indices into
+    ``orig_ts_ms``."""
+    if len(grid_peaks) == 0 or len(orig_ts_ms) == 0:
+        return np.array([], dtype=int)
+    peak_ms = np.asarray(grid_ts_ms)[grid_peaks]
+    idx = np.clip(np.searchsorted(orig_ts_ms, peak_ms), 1, len(orig_ts_ms) - 1)
+    pick_left = (peak_ms - orig_ts_ms[idx - 1]) <= (orig_ts_ms[idx] - peak_ms)
+    out = np.where(pick_left, idx - 1, idx)
+    return np.unique(out.astype(int))
+
+
+# ── Windowed HR agreement (within a single session) ─────────────────────────
+
+def _windowed_hr_agreement(ecg_ts_ms, ecg_peaks, ppg_ts_ms, ppg_peaks,
+                            window_s=30.0, step_s=5.0, min_peaks_per_window=3):
+    """Pair ECG and PPG mean HR over sliding windows within one session and
+    run CCC / ICC / Bland-Altman on the paired window vectors.
+
+    Window HR is count-based (``60·n_peaks/window_s``) — the same formula
+    the per-session mean HR uses, so a single-window equivalent collapses
+    to the original number. Windows that don't carry ≥``min_peaks_per_window``
+    peaks on *both* sides are dropped so a stretch of missed detections
+    can't inflate the LOA.
+
+    Returns ``None`` if the recording is shorter than one window. The
+    result dict has the same key names ``_hr_agreement_per_channel`` uses
+    so the frontend can render it with the same column set."""
+    if len(ecg_ts_ms) < 2 or len(ppg_ts_ms) < 2:
+        return None
+
+    ecg_peak_ms = ecg_ts_ms[ecg_peaks] if len(ecg_peaks) else np.array([], dtype=float)
+    ppg_peak_ms = ppg_ts_ms[ppg_peaks] if len(ppg_peaks) else np.array([], dtype=float)
+
+    t_start = max(float(ecg_ts_ms[0]), float(ppg_ts_ms[0]))
+    t_end   = min(float(ecg_ts_ms[-1]), float(ppg_ts_ms[-1]))
+    if (t_end - t_start) < window_s * 1000.0:
+        return None
+
+    win_ms  = window_s * 1000.0
+    step_ms = step_s * 1000.0
+
+    e_hrs, p_hrs = [], []
+    t = t_start
+    while t + win_ms <= t_end:
+        t_hi = t + win_ms
+        n_e = int(np.sum((ecg_peak_ms >= t) & (ecg_peak_ms < t_hi)))
+        n_p = int(np.sum((ppg_peak_ms >= t) & (ppg_peak_ms < t_hi)))
+        if n_e >= min_peaks_per_window and n_p >= min_peaks_per_window:
+            e_hrs.append(60.0 * n_e / window_s)
+            p_hrs.append(60.0 * n_p / window_s)
+        t += step_ms
+
+    n = len(e_hrs)
+    out = {
+        "window_s": float(window_s),
+        "step_s":   float(step_s),
+        "min_peaks_per_window": int(min_peaks_per_window),
+        "n_windows":     n,
+        "mean_hr_ecg_bpm": float("nan"),
+        "mean_hr_ppg_bpm": float("nan"),
+        "ccc":            float("nan"),
+        "pearson_r":      float("nan"),
+        "bias_bpm":       float("nan"),
+        "loa_lower_bpm":  float("nan"),
+        "loa_upper_bpm":  float("nan"),
+        "rmse_bpm":       float("nan"),
+        "mae_bpm":        float("nan"),
+        "icc":            float("nan"),
+        "icc_ci_low":     float("nan"),
+        "icc_ci_high":    float("nan"),
+    }
+    if n < 2:
+        return out
+
+    e = np.asarray(e_hrs, dtype=float)
+    p = np.asarray(p_hrs, dtype=float)
+    out["mean_hr_ecg_bpm"] = float(np.mean(e))
+    out["mean_hr_ppg_bpm"] = float(np.mean(p))
+    try:
+        st = compute_ccc(p, e)
+        out.update({
+            "ccc":           float(st["ccc"]),
+            "pearson_r":     float(st["pearson_r"]),
+            "bias_bpm":      float(st["bias"]),
+            "loa_lower_bpm": float(st["loa_lower"]),
+            "loa_upper_bpm": float(st["loa_upper"]),
+            "rmse_bpm":      float(st["rmse"]),
+            "mae_bpm":       float(st["mae"]),
+        })
+    except (ValueError, ZeroDivisionError):
+        pass
+    icc = _safe_icc(e, p)
+    if icc:
+        out.update({
+            "icc":         float(icc["icc"]),
+            "icc_ci_low":  float(icc["ci_low"]),
+            "icc_ci_high": float(icc["ci_high"]),
+        })
+    return out
+
+
+def _windowed_sdnn_agreement(ecg_ts_ms, ecg_peaks, ppg_ts_ms, ppg_peaks,
+                              window_s=60.0, step_s=10.0,
+                              min_intervals_per_window=10):
+    """Pair ECG and PPG SDNN over sliding windows within one session and
+    run CCC / ICC / Bland-Altman on the paired vectors.
+
+    SDNN is a second-moment statistic so it needs more samples per window
+    to be stable than HR does: 60 s / 10 s step with a floor of ten
+    intervals on each side is roughly the shortest window that gives a
+    usable per-window SDNN at resting HR. An interval is assigned to the
+    window its trailing (later) peak falls in.
+
+    Returns ``None`` if the recording is shorter than one window.
+    Result-dict keys mirror ``_windowed_hr_agreement`` (s/ms units swapped
+    in the obvious places) so the frontend can render with one helper."""
+    if len(ecg_peaks) < 2 or len(ppg_peaks) < 2:
+        return None
+
+    # Build (interval_ms, trailing-peak time_ms) for both sides.
+    ecg_int_ms = np.diff(ecg_ts_ms[ecg_peaks])
+    ecg_end_ms = ecg_ts_ms[ecg_peaks][1:]
+    ppg_int_ms = np.diff(ppg_ts_ms[ppg_peaks])
+    ppg_end_ms = ppg_ts_ms[ppg_peaks][1:]
+
+    t_start = max(float(ecg_ts_ms[0]), float(ppg_ts_ms[0]))
+    t_end   = min(float(ecg_ts_ms[-1]), float(ppg_ts_ms[-1]))
+    if (t_end - t_start) < window_s * 1000.0:
+        return None
+
+    win_ms  = window_s * 1000.0
+    step_ms = step_s * 1000.0
+
+    e_sdnns, p_sdnns = [], []
+    t = t_start
+    while t + win_ms <= t_end:
+        t_hi = t + win_ms
+        e_mask = (ecg_end_ms >= t) & (ecg_end_ms < t_hi)
+        p_mask = (ppg_end_ms >= t) & (ppg_end_ms < t_hi)
+        n_e = int(e_mask.sum())
+        n_p = int(p_mask.sum())
+        if n_e >= min_intervals_per_window and n_p >= min_intervals_per_window:
+            e_sdnns.append(float(np.std(ecg_int_ms[e_mask], ddof=1)))
+            p_sdnns.append(float(np.std(ppg_int_ms[p_mask], ddof=1)))
+        t += step_ms
+
+    n = len(e_sdnns)
+    out = {
+        "window_s": float(window_s),
+        "step_s":   float(step_s),
+        "min_intervals_per_window": int(min_intervals_per_window),
+        "n_windows":       n,
+        "mean_sdnn_ecg_ms": float("nan"),
+        "mean_sdnn_ppg_ms": float("nan"),
+        "ccc":             float("nan"),
+        "pearson_r":       float("nan"),
+        "bias_ms":         float("nan"),
+        "loa_lower_ms":    float("nan"),
+        "loa_upper_ms":    float("nan"),
+        "rmse_ms":         float("nan"),
+        "mae_ms":          float("nan"),
+        "icc":             float("nan"),
+        "icc_ci_low":      float("nan"),
+        "icc_ci_high":     float("nan"),
+    }
+    if n < 2:
+        return out
+
+    e = np.asarray(e_sdnns, dtype=float)
+    p = np.asarray(p_sdnns, dtype=float)
+    out["mean_sdnn_ecg_ms"] = float(np.mean(e))
+    out["mean_sdnn_ppg_ms"] = float(np.mean(p))
+    try:
+        st = compute_ccc(p, e)
+        out.update({
+            "ccc":          float(st["ccc"]),
+            "pearson_r":    float(st["pearson_r"]),
+            "bias_ms":      float(st["bias"]),
+            "loa_lower_ms": float(st["loa_lower"]),
+            "loa_upper_ms": float(st["loa_upper"]),
+            "rmse_ms":      float(st["rmse"]),
+            "mae_ms":       float(st["mae"]),
+        })
+    except (ValueError, ZeroDivisionError):
+        pass
+    icc = _safe_icc(e, p)
+    if icc:
+        out.update({
+            "icc":         float(icc["icc"]),
+            "icc_ci_low":  float(icc["ci_low"]),
+            "icc_ci_high": float(icc["ci_high"]),
+        })
+    return out
+
+
+def _freq_domain_metrics(nn_ms, min_beats=50):
+    """Frequency-domain HRV via pyhrv.welch_psd — same call old/PPGanalysis.py
+    uses. Returns absolute VLF / LF / HF power (ms²) and LF/HF ratio.
+
+    pyhrv internally cubic-spline resamples the NN series to 4 Hz and runs
+    scipy.signal.welch (nperseg=300 by default), then integrates over the
+    Task Force 1996 bands (VLF 0-0.04, LF 0.04-0.15, HF 0.15-0.40 Hz). NN
+    intervals must be in **milliseconds**; passing seconds (as PPGanalysis
+    does, almost certainly a bug) gives band powers that are 1e-6× too small.
+
+    Returns a NaN-filled dict if pyhrv isn't installed or the series is too
+    short. ``min_beats`` is the soft floor; pyhrv may still fail on edge
+    cases (very short or very irregular NN), in which case we silently
+    return the NaN dict — a single failing channel can't poison the session."""
+    out = {
+        "vlf_power_ms2": float("nan"),
+        "lf_power_ms2":  float("nan"),
+        "hf_power_ms2":  float("nan"),
+        "lf_hf_ratio":   float("nan"),
+    }
+    if _pyhrv_welch_psd is None or len(nn_ms) < min_beats:
+        return out
+    try:
+        import warnings
+        # pyhrv emits a figure even with show=False; tear it down so the
+        # backend's figure stack doesn't accumulate across N sessions × M
+        # channels. Importing matplotlib lazily so this stays the only
+        # place that touches the plot stack.
+        import matplotlib.pyplot as plt
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            r = _pyhrv_welch_psd(nni=np.asarray(nn_ms, dtype=float), show=False)
+        plt.close("all")
+        # ReturnTuple supports r["key"] indexing (but no .get()).
+        out["vlf_power_ms2"] = float(r["fft_abs"][0])
+        out["lf_power_ms2"]  = float(r["fft_abs"][1])
+        out["hf_power_ms2"]  = float(r["fft_abs"][2])
+        out["lf_hf_ratio"]   = float(r["fft_ratio"])
+    except Exception:
+        pass
+    return out
 
 
 # ── Signal loader for the Plotly views ───────────────────────────────────────
@@ -252,6 +585,53 @@ def load_session_signals(name, max_points=5000, tail_seconds=None,
     return {"ecg": ecg_payload, "channels": channels}
 
 
+def ecg_detail(name, start_s=None, end_s=None):
+    """Full-resolution ECG for the detailed-view popup (ECGvis.py-style).
+
+    Returns *every* sample (no decimation) plus the R-peaks detect_r_peaks
+    finds, on the same crop window the dashboard uses. ECG-only, so even at
+    full resolution the payload is a single ~100-130k-point trace rather
+    than the six the main signals endpoint ships.
+    """
+    sdir = sessions.session_path(name)
+    ecg_path = os.path.join(sdir, "ecg_data.csv")
+    if not os.path.isfile(ecg_path):
+        return {"error": "session has no ecg_data.csv"}
+
+    ts_ms, sig, leads_off = load_ecg(ecg_path)
+    if not len(ts_ms):
+        return {"error": "ecg_data.csv is empty"}
+
+    t0_ms = float(ts_ms[0])
+    ts_ms, (sig, leads_off) = _crop_window(ts_ms, [sig, leads_off], t0_ms, start_s, end_s)
+    if not len(ts_ms):
+        return {"error": "crop window selected no ECG samples"}
+
+    ts_s = (ts_ms - t0_ms) / 1000.0
+    fs = infer_fs(ts_ms)
+    try:
+        peaks = detect_r_peaks(sig, fs) if not np.isnan(fs) else np.array([], dtype=int)
+    except Exception:
+        peaks = np.array([], dtype=int)
+
+    dur = (float(ts_ms[-1]) - float(ts_ms[0])) / 1000.0 if len(ts_ms) > 1 else 0.0
+    mean_hr = (60.0 * len(peaks) / dur) if (dur > 0 and len(peaks)) else float("nan")
+
+    return {
+        "name": name,
+        "time_s": ts_s.tolist(),
+        "signal": sig.tolist(),
+        "fs_hz": fs,
+        "n_samples": int(len(sig)),
+        "duration_s": dur,
+        "n_peaks": int(len(peaks)),
+        "mean_hr_bpm": mean_hr,
+        "peak_times_s": ts_s[peaks].tolist() if len(peaks) else [],
+        "peak_values": sig[peaks].tolist() if len(peaks) else [],
+        "leads_off_spans": _leads_off_spans(ts_s, leads_off),
+    }
+
+
 def _crop_window(ts_ms, arrays, t0_ms, start_s, end_s):
     """Keep only samples whose time (seconds since the session origin
     ``t0_ms``) falls in [start_s, end_s]. This is the pre-processing
@@ -349,21 +729,36 @@ def analyze_channel(ppg_ts_ms, ppg_sig, ecg_ts_ms, ecg_sig, t0_ms=0.0,
     end can overlay markers on the downsampled Plotly signal traces
     without doing its own unit conversion.
     """
+    # Hybrid conditioning: drop backward-stepping timestamps, resample onto
+    # a uniform grid at the measured fs (so the Butterworth filters run on
+    # evenly-sampled data), then scrub motion spikes. clean_sig is the
+    # resampled, outlier-removed, *pre-bandpass* trace — SSQI/ZSQI run on
+    # it; the bandpass happens inside the peak detector only.
+    ppg_ts_ms, ppg_sig = _drop_non_monotonic(ppg_ts_ms, ppg_sig)
     ppg_fs = infer_fs(ppg_ts_ms)
     ecg_fs = infer_fs(ecg_ts_ms)
+
+    grid_ts_ms, grid_sig = _resample_uniform(ppg_ts_ms, ppg_sig, ppg_fs)
+    clean_sig = _remove_outliers(grid_sig)
 
     result = {
         "ppg_fs_hz": ppg_fs,
         "ecg_fs_hz": ecg_fs,
         "n_ppg_samples": int(len(ppg_sig)),
         "n_ecg_samples": int(len(ecg_sig)),
-        "ssqi": _safe_ssqi(ppg_sig),
+        "ssqi": _safe_ssqi(clean_sig),
         "zsqi_mean": float("nan"),
         "zsqi_std": float("nan"),
         "zsqi_max": float("nan"),
         "n_rr_intervals": 0,
         "n_ppi_intervals": 0,
         "n_matched_beats": 0,
+        "mean_hr_bpm": float("nan"),
+        "sdnn_ms": float("nan"),
+        "vlf_power_ms2": float("nan"),
+        "lf_power_ms2":  float("nan"),
+        "hf_power_ms2":  float("nan"),
+        "lf_hf_ratio":   float("nan"),
         "ppg_peak_times_s": [],
         "stats": None,
         "error": None,
@@ -371,8 +766,8 @@ def analyze_channel(ppg_ts_ms, ppg_sig, ecg_ts_ms, ecg_sig, t0_ms=0.0,
 
     # ZSQI — windowed zero-crossing rate of the mean-subtracted signal.
     try:
-        if not np.isnan(ppg_fs) and len(ppg_sig) > int(window_sec * ppg_fs):
-            _, zcrs = windowed_zcr(ppg_sig, ppg_fs, window_sec, step_sec)
+        if not np.isnan(ppg_fs) and len(clean_sig) > int(window_sec * ppg_fs):
+            _, zcrs = windowed_zcr(clean_sig, ppg_fs, window_sec, step_sec)
             if len(zcrs):
                 result["zsqi_mean"] = float(np.nanmean(zcrs))
                 result["zsqi_std"] = float(np.nanstd(zcrs))
@@ -383,7 +778,10 @@ def analyze_channel(ppg_ts_ms, ppg_sig, ecg_ts_ms, ecg_sig, t0_ms=0.0,
     # Peak detection + agreement.
     try:
         ecg_peaks = detect_r_peaks(ecg_sig, ecg_fs) if not np.isnan(ecg_fs) else np.array([], dtype=int)
-        ppg_peaks = detect_ppg_peaks(ppg_sig, ppg_fs) if not np.isnan(ppg_fs) else np.array([], dtype=int)
+        # Detect on the bandpassed uniform grid, then map peaks back to the
+        # nearest recorded timestamp so the intervals use true timing.
+        grid_peaks = detect_ppg_peaks_bp(clean_sig, ppg_fs) if not np.isnan(ppg_fs) else np.array([], dtype=int)
+        ppg_peaks = _grid_peaks_to_orig(grid_peaks, grid_ts_ms, ppg_ts_ms)
 
         rr_ms, rr_times = peaks_to_intervals(ecg_peaks, ecg_ts_ms) if len(ecg_peaks) else (np.array([]), np.array([]))
         ppi_ms, ppi_times = peaks_to_intervals(ppg_peaks, ppg_ts_ms) if len(ppg_peaks) else (np.array([]), np.array([]))
@@ -393,6 +791,28 @@ def analyze_channel(ppg_ts_ms, ppg_sig, ecg_ts_ms, ecg_sig, t0_ms=0.0,
         result["n_rr_intervals"] = int(len(rr_ms))
         result["n_ppi_intervals"] = int(len(ppi_ms))
         result["n_matched_beats"] = int(len(matched_rr))
+
+        # Per-channel mean HR (bpm), same count-based formula the ECG side
+        # uses in analyze_session — so the two are directly comparable in
+        # the agreement aggregator.
+        ppg_dur_s = ((float(ppg_ts_ms[-1]) - float(ppg_ts_ms[0])) / 1000.0
+                     if len(ppg_ts_ms) > 1 else 0.0)
+        if ppg_dur_s > 0 and len(ppg_peaks):
+            result["mean_hr_bpm"] = float(60.0 * len(ppg_peaks) / ppg_dur_s)
+
+        # Per-channel SDNN (ms) — sample std of the full PPI series; same
+        # definition the ECG side uses, so the cross-session SDNN-agreement
+        # aggregator can pair them directly.
+        if len(ppi_ms) >= 2:
+            result["sdnn_ms"] = float(np.std(ppi_ms, ddof=1))
+
+        # Per-channel frequency-domain HRV (pyhrv welch_psd) on the same
+        # full PPI series. Matches old/PPGanalysis.py's LF/HF computation.
+        ppg_fd = _freq_domain_metrics(ppi_ms)
+        result["vlf_power_ms2"] = ppg_fd["vlf_power_ms2"]
+        result["lf_power_ms2"]  = ppg_fd["lf_power_ms2"]
+        result["hf_power_ms2"]  = ppg_fd["hf_power_ms2"]
+        result["lf_hf_ratio"]   = ppg_fd["lf_hf_ratio"]
 
         if len(ppg_peaks):
             result["ppg_peak_times_s"] = (
@@ -468,12 +888,26 @@ def analyze_session(name, start_s=None, end_s=None):
     duration_s = ((float(ecg_ts_ms[-1]) - float(ecg_ts_ms[0])) / 1000.0) if len(ecg_ts_ms) > 1 else 0.0
     mean_hr = (60.0 * len(ecg_peaks) / duration_s) if (duration_s > 0 and len(ecg_peaks)) else float("nan")
 
+    # ECG SDNN (ms) — same definition as Task Force 1996; sample std (ddof=1)
+    # of the RR intervals over the cropped window. Used as the reference
+    # value for the SDNN-agreement aggregator.
+    ecg_rr_ms = np.diff(ecg_ts_ms[ecg_peaks]) if len(ecg_peaks) >= 2 else np.array([], dtype=float)
+    ecg_sdnn_ms = float(np.std(ecg_rr_ms, ddof=1)) if len(ecg_rr_ms) >= 2 else float("nan")
+
+    # ECG frequency-domain HRV via pyhrv (matches old/PPGanalysis.py).
+    ecg_fd = _freq_domain_metrics(ecg_rr_ms)
+
     ecg_info = {
         "fs_hz": ecg_fs,
         "n_samples": int(len(ecg_sig)),
         "duration_s": duration_s,
         "n_peaks": int(len(ecg_peaks)),
         "mean_hr_bpm": mean_hr,
+        "sdnn_ms": ecg_sdnn_ms,
+        "vlf_power_ms2": ecg_fd["vlf_power_ms2"],
+        "lf_power_ms2":  ecg_fd["lf_power_ms2"],
+        "hf_power_ms2":  ecg_fd["hf_power_ms2"],
+        "lf_hf_ratio":   ecg_fd["lf_hf_ratio"],
         "leads_off_samples": int((leads_off == 1).sum()) if len(leads_off) else 0,
         "peak_times_s": (
             ((ecg_ts_ms[ecg_peaks] - t0_ms) / 1000.0).tolist() if len(ecg_peaks) else []
@@ -567,6 +1001,195 @@ def _aggregate_per_site(per_session):
     return out
 
 
+def _lfhf_agreement_per_channel(per_session):
+    """Per-session LF/HF ratio (pyhrv welch_psd) paired with ECG LF/HF and
+    aggregated across sessions per channel. Same shape as ``_hr_agreement_
+    per_channel``; unitless ratio (no _ms / _bpm suffix on bias/LOA)."""
+    by_ch = {}
+    for s in per_session:
+        ecg = s.get("ecg") or {}
+        e_val = ecg.get("lf_hf_ratio")
+        if e_val is None or not np.isfinite(e_val):
+            continue
+        for row in s.get("results") or []:
+            ch = row.get("channel")
+            p_val = row.get("lf_hf_ratio")
+            if ch is None or p_val is None or not np.isfinite(p_val):
+                continue
+            slot = by_ch.setdefault(ch, {"ecg": [], "ppg": [], "site": row.get("site") or "unassigned"})
+            slot["ecg"].append(float(e_val))
+            slot["ppg"].append(float(p_val))
+
+    rows = []
+    for ch in sorted(by_ch.keys()):
+        e = np.asarray(by_ch[ch]["ecg"], dtype=float)
+        p = np.asarray(by_ch[ch]["ppg"], dtype=float)
+        n = len(e)
+        row = {
+            "channel": ch,
+            "site": by_ch[ch]["site"],
+            "n_sessions": n,
+            "mean_lfhf_ecg": float(np.mean(e)) if n else float("nan"),
+            "mean_lfhf_ppg": float(np.mean(p)) if n else float("nan"),
+            "ccc": float("nan"), "pearson_r": float("nan"),
+            "bias": float("nan"),
+            "loa_lower": float("nan"), "loa_upper": float("nan"),
+            "rmse": float("nan"), "mae": float("nan"),
+            "icc": float("nan"), "icc_ci_low": float("nan"), "icc_ci_high": float("nan"),
+        }
+        if n >= 2:
+            try:
+                st = compute_ccc(p, e)
+                row.update({
+                    "ccc":       float(st["ccc"]),
+                    "pearson_r": float(st["pearson_r"]),
+                    "bias":      float(st["bias"]),
+                    "loa_lower": float(st["loa_lower"]),
+                    "loa_upper": float(st["loa_upper"]),
+                    "rmse":      float(st["rmse"]),
+                    "mae":       float(st["mae"]),
+                })
+            except (ValueError, ZeroDivisionError):
+                pass
+            icc = _safe_icc(e, p)
+            if icc:
+                row.update({
+                    "icc":         float(icc["icc"]),
+                    "icc_ci_low":  float(icc["ci_low"]),
+                    "icc_ci_high": float(icc["ci_high"]),
+                })
+        rows.append(row)
+    return rows
+
+
+def _sdnn_agreement_per_channel(per_session):
+    """Per-session SDNN (ms) of every PPG channel paired with that session's
+    ECG SDNN, aggregated across sessions per channel index. Mirrors
+    ``_hr_agreement_per_channel`` exactly — same shape, ms units."""
+    by_ch = {}
+    for s in per_session:
+        ecg = s.get("ecg") or {}
+        sdnn_e = ecg.get("sdnn_ms")
+        if sdnn_e is None or not np.isfinite(sdnn_e):
+            continue
+        for row in s.get("results") or []:
+            ch = row.get("channel")
+            sdnn_p = row.get("sdnn_ms")
+            if ch is None or sdnn_p is None or not np.isfinite(sdnn_p):
+                continue
+            slot = by_ch.setdefault(ch, {"ecg": [], "ppg": [], "site": row.get("site") or "unassigned"})
+            slot["ecg"].append(float(sdnn_e))
+            slot["ppg"].append(float(sdnn_p))
+
+    rows = []
+    for ch in sorted(by_ch.keys()):
+        e = np.asarray(by_ch[ch]["ecg"], dtype=float)
+        p = np.asarray(by_ch[ch]["ppg"], dtype=float)
+        n = len(e)
+        row = {
+            "channel": ch,
+            "site": by_ch[ch]["site"],
+            "n_sessions": n,
+            "mean_sdnn_ecg_ms": float(np.mean(e)) if n else float("nan"),
+            "mean_sdnn_ppg_ms": float(np.mean(p)) if n else float("nan"),
+            "ccc": float("nan"), "pearson_r": float("nan"),
+            "bias_ms": float("nan"),
+            "loa_lower_ms": float("nan"), "loa_upper_ms": float("nan"),
+            "rmse_ms": float("nan"), "mae_ms": float("nan"),
+            "icc": float("nan"), "icc_ci_low": float("nan"), "icc_ci_high": float("nan"),
+        }
+        if n >= 2:
+            try:
+                st = compute_ccc(p, e)
+                row.update({
+                    "ccc":          float(st["ccc"]),
+                    "pearson_r":    float(st["pearson_r"]),
+                    "bias_ms":      float(st["bias"]),
+                    "loa_lower_ms": float(st["loa_lower"]),
+                    "loa_upper_ms": float(st["loa_upper"]),
+                    "rmse_ms":      float(st["rmse"]),
+                    "mae_ms":       float(st["mae"]),
+                })
+            except (ValueError, ZeroDivisionError):
+                pass
+            icc = _safe_icc(e, p)
+            if icc:
+                row.update({
+                    "icc":         float(icc["icc"]),
+                    "icc_ci_low":  float(icc["ci_low"]),
+                    "icc_ci_high": float(icc["ci_high"]),
+                })
+        rows.append(row)
+    return rows
+
+
+def _hr_agreement_per_channel(per_session):
+    """Per-session mean HR (bpm) of every PPG channel paired with that
+    session's ECG mean HR, aggregated across sessions per channel index.
+
+    Returns one row per channel with CCC, ICC (CI), Pearson r, Bland-Altman
+    bias + LOA, RMSE/MAE on the (HR_ecg_i, HR_ppg_i) vectors. Same agreement
+    pipeline the interval CCC uses; the only difference is the unit — bpm
+    instead of ms — and that each session contributes one paired point,
+    not one per beat. With small N (few sessions) the bias/LOA carry more
+    weight than CCC/ICC, which need more sessions to stabilise."""
+    by_ch = {}
+    for s in per_session:
+        ecg = s.get("ecg") or {}
+        hr_e = ecg.get("mean_hr_bpm")
+        if hr_e is None or not np.isfinite(hr_e):
+            continue
+        for row in s.get("results") or []:
+            ch = row.get("channel")
+            hr_p = row.get("mean_hr_bpm")
+            if ch is None or hr_p is None or not np.isfinite(hr_p):
+                continue
+            slot = by_ch.setdefault(ch, {"ecg": [], "ppg": [], "site": row.get("site") or "unassigned"})
+            slot["ecg"].append(float(hr_e))
+            slot["ppg"].append(float(hr_p))
+
+    rows = []
+    for ch in sorted(by_ch.keys()):
+        e = np.asarray(by_ch[ch]["ecg"], dtype=float)
+        p = np.asarray(by_ch[ch]["ppg"], dtype=float)
+        n = len(e)
+        row = {
+            "channel": ch,
+            "site": by_ch[ch]["site"],
+            "n_sessions": n,
+            "mean_hr_ecg_bpm": float(np.mean(e)) if n else float("nan"),
+            "mean_hr_ppg_bpm": float(np.mean(p)) if n else float("nan"),
+            "ccc": float("nan"), "pearson_r": float("nan"),
+            "bias_bpm": float("nan"),
+            "loa_lower_bpm": float("nan"), "loa_upper_bpm": float("nan"),
+            "rmse_bpm": float("nan"), "mae_bpm": float("nan"),
+            "icc": float("nan"), "icc_ci_low": float("nan"), "icc_ci_high": float("nan"),
+        }
+        if n >= 2:
+            try:
+                st = compute_ccc(p, e)
+                row.update({
+                    "ccc":           float(st["ccc"]),
+                    "pearson_r":     float(st["pearson_r"]),
+                    "bias_bpm":      float(st["bias"]),
+                    "loa_lower_bpm": float(st["loa_lower"]),
+                    "loa_upper_bpm": float(st["loa_upper"]),
+                    "rmse_bpm":      float(st["rmse"]),
+                    "mae_bpm":       float(st["mae"]),
+                })
+            except (ValueError, ZeroDivisionError):
+                pass
+            icc = _safe_icc(e, p)
+            if icc:
+                row.update({
+                    "icc":         float(icc["icc"]),
+                    "icc_ci_low":  float(icc["ci_low"]),
+                    "icc_ci_high": float(icc["ci_high"]),
+                })
+        rows.append(row)
+    return rows
+
+
 def analyze_all_sessions(start_s=None, end_s=None):
     """Run analyze_session on every session_*/ folder under MDPIdata/.
 
@@ -607,12 +1230,18 @@ def analyze_all_sessions(start_s=None, end_s=None):
         per_session.append(r)
 
     per_site = _aggregate_per_site(per_session)
+    hr_per_channel = _hr_agreement_per_channel(per_session)
+    sdnn_per_channel = _sdnn_agreement_per_channel(per_session)
+    lfhf_per_channel = _lfhf_agreement_per_channel(per_session)
     return {
         "n_sessions_total":     len(summaries),
         "n_sessions_analyzed":  len(per_session),
         "failed_sessions":      failed,
         "sessions":             per_session,
         "per_site":             per_site,
+        "hr_per_channel":       hr_per_channel,
+        "sdnn_per_channel":     sdnn_per_channel,
+        "lfhf_per_channel":     lfhf_per_channel,
         "fst_unavailable":      not any_fst,
         "crop_window": {"start_s": start_s, "end_s": end_s},
         "interpretation":       interpret_batch(per_session, per_site, failed, not any_fst),

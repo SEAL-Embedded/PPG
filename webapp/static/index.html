@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>SEAL · PPG — Acquisition &amp; Analysis</title>
-<link rel="stylesheet" href="/static/style.css?v=20260525a">
+<link rel="stylesheet" href="/static/style.css?v=20260526a">
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
 <body>
@@ -130,6 +130,30 @@
           <span class="right" id="batch-per-site-summary"></span>
         </div>
         <div class="sqi-wrap"><table class="sqi-table" id="batch-per-site-table"></table></div>
+      </section>
+
+      <section class="block" id="batch-hr-block">
+        <div class="header-row">
+          <p class="eyebrow">Heart rate — PPG vs ECG, across sessions</p>
+          <span class="right" id="batch-hr-summary"></span>
+        </div>
+        <div class="sqi-wrap"><table class="sqi-table" id="batch-hr-table"></table></div>
+      </section>
+
+      <section class="block" id="batch-sdnn-block">
+        <div class="header-row">
+          <p class="eyebrow">HRV SDNN — PPG vs ECG, across sessions</p>
+          <span class="right" id="batch-sdnn-summary"></span>
+        </div>
+        <div class="sqi-wrap"><table class="sqi-table" id="batch-sdnn-table"></table></div>
+      </section>
+
+      <section class="block" id="batch-lfhf-block">
+        <div class="header-row">
+          <p class="eyebrow">LF/HF ratio — PPG vs ECG, across sessions</p>
+          <span class="right" id="batch-lfhf-summary"></span>
+        </div>
+        <div class="sqi-wrap"><table class="sqi-table" id="batch-lfhf-table"></table></div>
       </section>
 
       <section class="block" id="batch-per-channel-block">
@@ -272,7 +296,10 @@
       <section class="block" id="ecg-block">
         <div class="header-row">
           <p class="eyebrow">ECG reference</p>
-          <span class="right" id="ecg-summary"></span>
+          <div class="hdr-actions">
+            <button id="btn-ecg-detail" class="ghost mini">⤢ Detailed view</button>
+            <span class="right" id="ecg-summary"></span>
+          </div>
         </div>
         <div id="ecg-plot" class="plot hero"></div>
       </section>
@@ -301,6 +328,15 @@
           <span class="right" id="sqi-summary"></span>
         </div>
         <div class="sqi-wrap"><table class="sqi-table" id="sqi-table"></table></div>
+      </section>
+
+      <!-- Per-channel HRV metric comparison (entire-session values vs ECG) -->
+      <section class="block hidden" id="hrv-compare-block">
+        <div class="header-row">
+          <p class="eyebrow">HRV metrics — PPG vs ECG (this session)</p>
+          <span class="right" id="hrv-compare-summary"></span>
+        </div>
+        <div class="sqi-wrap"><table class="sqi-table" id="hrv-compare-table"></table></div>
       </section>
 
       <!-- Bland-Altman -->
@@ -363,6 +399,18 @@
   </div>
 </div>
 
+<!-- ECG detailed view modal (ECGvis.py-style full-resolution plot) -->
+<div id="ecg-detail-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="ecg-detail-title">
+  <div class="modal ecg-detail-modal">
+    <h3 id="ecg-detail-title">ECG — full resolution</h3>
+    <p class="modal-text" id="ecg-detail-meta"></p>
+    <div id="ecg-detail-plot" class="ecg-detail-plot"></div>
+    <div class="modal-actions">
+      <button id="ecg-detail-close">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- Batch archive list modal -->
 <div id="batch-archive-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="batch-archive-title">
   <div class="modal log-modal">
@@ -396,6 +444,6 @@
   </div>
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=20260528d"></script>
 </body>
 </html>

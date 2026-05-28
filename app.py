@@ -21,8 +21,8 @@ import threading
 import webbrowser
 
 import uvicorn
-
-from webapp.api import app   # re-exported here for `uvicorn app:app` users too
+     
+from webapp.api import app   # re-exported here for `uvicorn app:app` users too     
 
 
 def _open_browser(url, delay_s=1.2):
