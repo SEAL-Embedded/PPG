@@ -34,13 +34,12 @@ class TestComputeHrvFeatures:
             assert not np.isfinite(feats[k]), f"{k} should be NaN"
 
     def test_clean_rr_series_returns_finite_features(self):
-        """A 120-beat synthetic RR series at 800 ms ± 30 ms must produce
-        finite values for the time-domain, Poincaré, and sample-entropy
-        features. (LF/HF Lomb-Scargle may still be noisy on synthetic
-        data — we don't assert finite there.) 120 beats clears both the
-        time-domain (30) and sample-entropy (100) gates."""
+        """A 60-beat synthetic RR series at 800 ms ± 30 ms must produce
+        finite values for the time-domain and Poincaré features. (LF/HF
+        Lomb-Scargle may still be noisy on synthetic data — we don't
+        assert finite there.)"""
         rng = np.random.default_rng(7)
-        n = 120
+        n = 60
         rr_ms = 800.0 + 30.0 * rng.standard_normal(n)
         # Build cumulative times in seconds for the timestamps.
         rr_t_s = np.cumsum(rr_ms / 1000.0)
@@ -52,7 +51,7 @@ class TestComputeHrvFeatures:
         assert np.isfinite(feats["sd1_ms"])
         assert np.isfinite(feats["sd2_ms"])
         assert 0.0 <= feats["pnn50"] <= 1.0
-        # Sample entropy on this length (>=100 beats) should be a real number.
+        # Sample entropy on this length should be a real number.
         assert np.isfinite(feats["sampen"])
 
     def test_poincare_brennan_identities(self):
@@ -69,46 +68,6 @@ class TestComputeHrvFeatures:
         diffs = np.diff(rr_ms)
         expected_sd2_sq = 2.0 * (feats["sdnn_ms"] ** 2) - 0.5 * float(np.var(diffs, ddof=1))
         assert feats["sd2_ms"] ** 2 == pytest.approx(expected_sd2_sq, rel=1e-6)
-
-
-# ── Tiered MIN_BEATS gates (H1) ─────────────────────────────────────────────
-
-class TestTieredMinBeats:
-
-    def test_50_beats_yields_finite_timedomain_nan_spectral(self):
-        """50-beat series: SDNN finite, LF/HF NaN, SampEn NaN."""
-        rng = np.random.default_rng(7)
-        n = 50
-        rr_ms = 800.0 + 30.0 * rng.standard_normal(n)
-        rr_t_s = np.cumsum(rr_ms / 1000.0)
-        feats = sleepiness.compute_hrv_features(rr_ms, rr_t_s)
-        assert np.isfinite(feats["sdnn_ms"])
-        assert np.isfinite(feats["rmssd_ms"])
-        assert not np.isfinite(feats["lf_power"])  # spectral gate
-        assert not np.isfinite(feats["hf_power"])
-        assert not np.isfinite(feats["sampen"])    # sampen gate
-
-    def test_120_beats_yields_finite_timedomain_and_sampen_nan_spectral(self):
-        rng = np.random.default_rng(7)
-        n = 120
-        rr_ms = 800.0 + 30.0 * rng.standard_normal(n)
-        rr_t_s = np.cumsum(rr_ms / 1000.0)
-        feats = sleepiness.compute_hrv_features(rr_ms, rr_t_s)
-        assert np.isfinite(feats["sdnn_ms"])
-        assert np.isfinite(feats["sampen"])
-        assert not np.isfinite(feats["lf_power"])
-
-    def test_200_beats_yields_finite_everything(self):
-        rng = np.random.default_rng(7)
-        n = 200
-        rr_ms = 800.0 + 30.0 * rng.standard_normal(n)
-        rr_t_s = np.cumsum(rr_ms / 1000.0)
-        feats = sleepiness.compute_hrv_features(rr_ms, rr_t_s)
-        assert np.isfinite(feats["sdnn_ms"])
-        # Lomb-Scargle on synthetic data is noisy but the spectral gate
-        # must not reject n=200. The earlier n=50/120 tests prove the
-        # gate fires correctly when it should — this test simply confirms
-        # that at n=200 the gate doesn't reject the call.
 
 
 # ── Sample entropy ──────────────────────────────────────────────────────────
@@ -129,52 +88,6 @@ class TestSampleEntropy:
 
     def test_short_series_returns_nan(self):
         assert not np.isfinite(sleepiness._sample_entropy(np.array([1.0, 2.0])))
-
-
-# ── Lomb-Scargle units documentation (H3) ───────────────────────────────────
-
-class TestLombScargleUnitsDocstring:
-
-    def test_lomb_scargle_docstring_mentions_ms2_hz(self):
-        """Documentation honesty — the return is amplitude²·Hz, not amplitude².
-
-        scipy.signal.lombscargle(normalize=False) returns amplitude² in ms²
-        (since the input is RR in ms), and np.trapezoid integrates over a
-        frequency axis in Hz — so the integral has units ms²·Hz. The
-        original docstring claimed ms² which is off by the band width.
-        """
-        import inspect
-        src = inspect.getsource(sleepiness._lomb_scargle_band_power)
-        assert ("ms²·Hz" in src or "ms^2·Hz" in src or "ms^2*Hz" in src
-                or "amplitude² integrated over frequency" in src), (
-            "Lomb-Scargle docstring must clarify units are ms²·Hz, not ms²"
-        )
-
-
-# ── Sample entropy off-by-one (H2) ──────────────────────────────────────────
-
-class TestSampleEntropyOffByOne:
-
-    def test_sample_entropy_perfectly_periodic_signal_is_zero(self):
-        """Richman & Moorman 2000 eq. 2 has both phi(m) and phi(m+1) using
-        the SAME N - m templates so the ratio A / B is unbiased.
-
-        On a perfectly periodic integer-sampled signal (e.g. [1,2,3,4,5]
-        repeated), every length-m template that matches another also has
-        a matching length-(m+1) extension (because the signal repeats
-        exactly). So A = B exactly, and -ln(A/B) = 0. The off-by-one form
-        used N-m+1 templates for phi(m) but only N-m for phi(m+1), making
-        B > A and SampEn slightly positive (~0.01 here).
-
-        Bound: ≤ 1e-6 — Richman's form gives exactly 0 (modulo floating
-        point); the off-by-one gives ~0.01.
-        """
-        x = np.tile([1.0, 2.0, 3.0, 4.0, 5.0], 40)  # 200 samples, period 5
-        v = sleepiness._sample_entropy(
-            x, m=2, r=0.2 * float(np.std(x, ddof=1))
-        )
-        assert np.isfinite(v)
-        assert v < 1e-6, f"SampEn of perfectly periodic signal should be 0, got {v}"
 
 
 # ── SPI scoring ─────────────────────────────────────────────────────────────

@@ -2314,7 +2314,6 @@ async function runSleepinessSummary({prefer_cached = true} = {}) {
   renderSleepinessCaveats(payload);
   renderSleepinessScatter(payload);
   renderSleepinessPerSite(payload);
-  renderPerFeatureCCC(payload.per_feature);
   renderSleepinessBlandAltman(payload);
   renderSleepinessFeatures(payload);
   renderSleepinessFstTable(payload);
@@ -2454,106 +2453,6 @@ function renderSleepinessPerSite(p) {
     </tr>`;
   });
   tbl.innerHTML = html + "</tbody>";
-}
-
-// ---------------------------------------------------------------------------
-// Per-HRV-feature CCC tables (overall + per site).
-//
-// Backend ships `per_feature.overall` and `per_feature.per_site` from
-// /api/sleepiness_summary. Each entry has {n, ccc, pearson_r, bias,
-// loa_lower, loa_upper, rmse, mae, caveat}. Caveats:
-//   • "insufficient_n"  → ccc is null, row rendered muted
-//   • "small_n"         → ccc finite but n-pill is amber
-// CCC bands here use >= (≥ 0.95 green, ≥ 0.90 amber, otherwise red) — this
-// differs from the existing gradeCCC() helper which uses strict >, so we
-// keep a local _pfCccClass to honour the per-feature spec without touching
-// the SPI-CCC grading used elsewhere.
-// ---------------------------------------------------------------------------
-
-const HRV_FEATURE_LABELS = {
-  sdnn_ms:     "SDNN (ms)",
-  rmssd_ms:    "RMSSD (ms)",
-  pnn50:       "pNN50",
-  lf_power:    "LF power (ms²·Hz)",
-  hf_power:    "HF power (ms²·Hz)",
-  lf_nu:       "LFnu",
-  hf_nu:       "HFnu",
-  lf_hf_ratio: "LF/HF ratio",
-  log_lf_hf:   "log(LF/HF)",
-  sd1_ms:      "SD1 (ms)",
-  sd2_ms:      "SD2 (ms)",
-  sd1_sd2:     "SD1/SD2",
-  sampen:      "SampEn",
-};
-
-function _pfCccClass(v) {
-  if (v == null || !isFinite(v)) return "ccc-null";
-  if (v >= 0.95) return "ccc-good";
-  if (v >= 0.90) return "ccc-ok";
-  return "ccc-bad";
-}
-
-function _renderPerFeatureTable(tableEl, featureDict) {
-  const thead = `<thead><tr>
-    <th>Feature</th><th>n</th><th>CCC</th><th>Pearson</th>
-    <th>Bias</th><th>LOA span</th><th>RMSE</th>
-  </tr></thead>`;
-  const rows = Object.keys(HRV_FEATURE_LABELS).map(fk => {
-    const s = featureDict[fk] || {};
-    const n = s.n ?? 0;
-    const ccc = s.ccc;
-    const caveat = s.caveat;
-    const nClass = caveat === "small_n" ? "n-small" : "";
-    const rowClass = caveat === "insufficient_n" ? "row-muted" : "";
-    const cccClass = _pfCccClass(ccc);
-    const loaSpan = (s.loa_upper != null && s.loa_lower != null &&
-                     isFinite(s.loa_upper) && isFinite(s.loa_lower))
-      ? (s.loa_upper - s.loa_lower) : null;
-    return `<tr class="${rowClass}">
-      <td class="ch-name">${escHTML(HRV_FEATURE_LABELS[fk])}</td>
-      <td class="${nClass}">${n}</td>
-      <td class="${cccClass}">${fmt(ccc, 3)}</td>
-      <td>${fmt(s.pearson_r, 3)}</td>
-      <td>${fmtSigned(s.bias, 2)}</td>
-      <td>${fmt(loaSpan, 1)}</td>
-      <td>${fmt(s.rmse, 2)}</td>
-    </tr>`;
-  }).join("");
-  tableEl.innerHTML = thead + "<tbody>" + rows + "</tbody>";
-}
-
-function renderPerFeatureCCC(perFeature) {
-  const sec = $("per-feature-ccc-section");
-  if (!sec) return;
-  if (!perFeature) {
-    sec.classList.add("hidden");
-    return;
-  }
-  sec.classList.remove("hidden");
-  _renderPerFeatureTable(
-    $("per-feature-overall-table"),
-    perFeature.overall || {}
-  );
-  const perSiteContainer = $("per-feature-per-site-tables");
-  perSiteContainer.innerHTML = "";
-  const sites = Object.keys(perFeature.per_site || {}).sort();
-  if (!sites.length) {
-    perSiteContainer.innerHTML = `<p class="muted">no per-site data</p>`;
-    return;
-  }
-  sites.forEach(site => {
-    const featureDict = perFeature.per_site[site] || {};
-    const h = document.createElement("h5");
-    h.textContent = site;
-    const wrap = document.createElement("div");
-    wrap.className = "sqi-wrap";
-    const t = document.createElement("table");
-    t.className = "sqi-table";
-    _renderPerFeatureTable(t, featureDict);
-    wrap.appendChild(t);
-    perSiteContainer.appendChild(h);
-    perSiteContainer.appendChild(wrap);
-  });
 }
 
 function renderSleepinessBlandAltman(p) {

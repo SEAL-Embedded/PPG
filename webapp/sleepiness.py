@@ -40,7 +40,6 @@ from sqi.ccc import (
     detect_r_peaks,
     peaks_to_intervals,
 )
-from sqi.hrv_clean import clean_intervals
 
 from . import analysis, sessions
 
@@ -58,24 +57,10 @@ SPI_WEIGHTS = {
 LF_BAND = (0.04, 0.15)    # Hz, Task Force 1996
 HF_BAND = (0.15, 0.40)    # Hz, Task Force 1996
 
-# Tiered minimum-beat thresholds. Each HRV feature has a different
-# variance floor below which the estimate is uninterpretable, so we gate
-# them separately instead of using a single MIN_BEATS_FOR_HRV.
-#
-#   * Time-domain (SDNN, RMSSD, pNN50, Poincaré sd1/sd2): 30 beats —
-#     Task Force 1996 floor for short-term HRV.
-#   * Sample entropy: 100 beats — Richman & Moorman 2000 note the
-#     estimator's variance is large below ~100 templates.
-#   * Spectral (LF, HF, derived ratios): 150 beats — covers at least one
-#     LF cycle (~25 s @ 60 BPM) with enough beats for Lomb-Scargle.
-MIN_BEATS_TIMEDOMAIN = 30
-MIN_BEATS_SAMPEN = 100
-MIN_BEATS_SPECTRAL = 150
-
-# Backward-compat alias — the old MIN_BEATS_FOR_HRV name is still
-# referenced by other modules (analyze_session, etc.) and persists as
-# the time-domain gate value.
-MIN_BEATS_FOR_HRV = MIN_BEATS_TIMEDOMAIN
+# Minimum number of RR/PPI intervals before HRV features are even
+# attempted — fewer than 30 beats means SDNN/RMSSD are too noisy to be
+# meaningful (Task Force 1996 suggests ~5 min of clean ECG).
+MIN_BEATS_FOR_HRV = 30
 
 # Tiny floor inside log(HFnu) so log(0) doesn't poison the SPI when a
 # segment has zero HF power.
@@ -100,11 +85,6 @@ CAVEATS = [
     "missing beats short PPG segments produce, but Lomb-Scargle has different leakage "
     "behaviour than FFT-after-cubic-spline; numbers will not match an FFT pipeline beat-for-"
     "beat.",
-    "Absolute LF / HF band powers are reported in ms²·Hz (amplitude² integrated over "
-    "frequency), not ms² — scipy.signal.lombscargle(normalize=False) returns amplitude² in "
-    "ms², which the trapezoidal integration over the band's Hz axis multiplies by a band "
-    "width. The dimensionless ratios (lf_nu, hf_nu, log_lf_hf) are unaffected; they cancel "
-    "the bandwidth factor and are the SPI inputs that actually drive the index.",
     "Sample entropy is computed with m=2, r=0.2·SDNN (Richman & Moorman 2000). On series of "
     "fewer than ~100 intervals the estimator's variance is large; per-session SampEn from "
     "5-minute resting recordings is reported but should not be used to compare individuals.",
@@ -135,16 +115,10 @@ def _sample_entropy(series, m=2, r=None):
     than m+2 points), or when the matching template counts come out zero
     (log of zero would be -inf). Pure numpy keeps us off the nolds
     dependency hop and is fast enough for ~500-beat RR series.
-
-    Per Richman & Moorman 2000 eq. (2), both phi(m) and phi(m+1) iterate
-    over the SAME N - m templates so the ratio A / B is unbiased — the
-    earlier implementation used N - m + 1 templates for phi(m) and only
-    N - m for phi(m+1), inflating B and biasing SampEn upward by a small
-    positive amount (most visible on perfectly periodic signals).
     """
     x = np.asarray(series, dtype=float)
     n = len(x)
-    if n - m < 2:
+    if n < m + 2:
         return float("nan")
     if r is None:
         r = 0.2 * float(np.std(x, ddof=1)) if n > 1 else 0.0
@@ -152,12 +126,10 @@ def _sample_entropy(series, m=2, r=None):
         return float("nan")
 
     def _phi(m_):
-        # Templates: rows of length m_ from x. Both phi(m) and phi(m+1)
-        # iterate over the SAME N - m templates (Richman & Moorman 2000
-        # eq. 2) — `m` here is the outer closure variable, not `m_`.
-        if n - m < 2:
+        # Templates: rows of length m_ from x.
+        if n - m_ + 1 < 2:
             return 0.0
-        tmpl = np.array([x[i:i + m_] for i in range(n - m)])
+        tmpl = np.array([x[i:i + m_] for i in range(n - m_ + 1)])
         # Chebyshev (max-abs) distance, exclude self-matches via -1.
         # Vectorised: for every pair of templates compute max-abs diff.
         diff = np.abs(tmpl[:, None, :] - tmpl[None, :, :]).max(axis=2)
@@ -182,19 +154,10 @@ def _lomb_scargle_band_power(rr_ms, rr_times_s, band):
 
     Returns NaN if there are too few intervals, or the requested band has
     zero width / no frequency samples.
-
-    Units. ``scipy.signal.lombscargle(normalize=False)`` returns
-    amplitude² (in ms² because the input is RR in ms); integrating that
-    over a frequency axis in Hz gives band power in ms²·Hz (i.e.,
-    amplitude² integrated over frequency), not ms². The previous
-    docstring said ms² — wrong by a factor of band width. The downstream
-    SPI consumes only the dimensionless ratios (lf_nu, hf_nu, log_lf_hf)
-    which cancel the band-width factor, so this unit clarification is
-    documentation-only and does not change any numbers.
     """
     rr_ms = np.asarray(rr_ms, dtype=float)
     rr_times_s = np.asarray(rr_times_s, dtype=float)
-    if len(rr_ms) < MIN_BEATS_SPECTRAL or len(rr_ms) != len(rr_times_s):
+    if len(rr_ms) < MIN_BEATS_FOR_HRV or len(rr_ms) != len(rr_times_s):
         return float("nan")
     f_lo, f_hi = band
     if f_hi <= f_lo:
@@ -214,9 +177,8 @@ def _lomb_scargle_band_power(rr_ms, rr_times_s, band):
     except Exception:
         return float("nan")
     # Integrate the periodogram across the band — trapezoidal rule on the
-    # freqs grid gives band power in ms²·Hz (amplitude² in ms² times the
-    # Hz axis of the integral). Absolute value to be safe against tiny
-    # negative numerical noise on near-zero bins.
+    # freqs grid gives band power in (ms^2). Absolute value to be safe
+    # against tiny negative numerical noise on near-zero bins.
     # numpy 2.0 renames np.trapz -> np.trapezoid; fall back for older numpy.
     _trap = getattr(np, "trapezoid", None) or np.trapz
     power = float(_trap(np.abs(pgram), freqs))
@@ -230,17 +192,14 @@ def compute_hrv_features(rr_ms, rr_times_s):
     the timestamps of the *end* of each interval in seconds (as returned
     by sqi.ccc.peaks_to_intervals).
 
-    Returns a dict of all 13 features. Each feature has a tiered minimum-
-    beat gate (see MIN_BEATS_TIMEDOMAIN / _SAMPEN / _SPECTRAL): below the
-    time-domain floor every feature is NaN; above the time-domain floor
-    but below the sample-entropy floor sampen is NaN; below the spectral
-    floor the LF/HF features are NaN (gate enforced inside
-    `_lomb_scargle_band_power`). Keys are always present so downstream
-    z-norm and aggregation can iterate without conditional logic.
+    Returns a dict of all 13 features; every value is NaN when the
+    series has fewer than MIN_BEATS_FOR_HRV intervals so downstream
+    z-norm and aggregation can iterate over the same keys regardless of
+    whether the channel was usable.
     """
     rr = np.asarray(rr_ms, dtype=float)
     rr_t = np.asarray(rr_times_s, dtype=float)
-    if len(rr) < MIN_BEATS_TIMEDOMAIN:
+    if len(rr) < MIN_BEATS_FOR_HRV:
         return _nan_features()
 
     # ── Time-domain (Task Force 1996) ────────────────────────────────────
@@ -250,8 +209,6 @@ def compute_hrv_features(rr_ms, rr_times_s):
     pnn50 = float(np.mean(np.abs(diffs) > 50.0)) if len(diffs) else float("nan")
 
     # ── Frequency-domain (Lomb-Scargle, Lomb 1976) ───────────────────────
-    # The MIN_BEATS_SPECTRAL gate lives inside `_lomb_scargle_band_power`,
-    # which returns NaN for series below that threshold.
     lf_power = _lomb_scargle_band_power(rr, rr_t, LF_BAND)
     hf_power = _lomb_scargle_band_power(rr, rr_t, HF_BAND)
 
@@ -281,12 +238,7 @@ def compute_hrv_features(rr_ms, rr_times_s):
     sd1_sd2 = (sd1 / sd2) if (np.isfinite(sd1) and np.isfinite(sd2) and sd2 > 0) else float("nan")
 
     # ── Complexity ────────────────────────────────────────────────────────
-    # Sample entropy has its own tier — Richman & Moorman 2000 note the
-    # estimator's variance is large below ~100 templates.
-    if len(rr) >= MIN_BEATS_SAMPEN:
-        sampen = _sample_entropy(rr, m=2, r=0.2 * sdnn if np.isfinite(sdnn) else None)
-    else:
-        sampen = float("nan")
+    sampen = _sample_entropy(rr, m=2, r=0.2 * sdnn if np.isfinite(sdnn) else None)
 
     return {
         "sdnn_ms":     float(sdnn),
@@ -455,10 +407,6 @@ def _analyze_one_session(session_name, analyzed_payload, cohort_stats):
         pt_s = np.asarray(ecg_peak_times_s, dtype=float)
         rr_ms = np.diff(pt_s) * 1000.0
         rr_t_s = pt_s[1:]
-        # NN-cleaning: drop physiologically implausible intervals + Karlsson
-        # 20% local-median rule, so SDNN/RMSSD/LF/HF aren't poisoned by one
-        # missed beat (sqi/hrv_clean.py).
-        rr_ms, rr_t_s, _ = clean_intervals(rr_ms, rr_t_s)
         ecg_feats = compute_hrv_features(rr_ms, rr_t_s)
         n_rr = int(len(rr_ms))
         ecg_spi, ecg_components = compute_sleepiness_index(ecg_feats, cohort_stats)
@@ -497,10 +445,6 @@ def _analyze_one_session(session_name, analyzed_payload, cohort_stats):
                         peaks = detect_ppg_peaks(ppg_sig, fs)
                         if len(peaks) >= MIN_BEATS_FOR_HRV + 1:
                             ppi_ms, ppi_times_s = peaks_to_intervals(peaks, ppg_ts_ms)
-                            # Same NN-cleaning as ECG so PPG HRV features and
-                            # the per-feature CCC reflect physiological
-                            # fidelity, not detector-error survival.
-                            ppi_ms, ppi_times_s, _ = clean_intervals(ppi_ms, ppi_times_s)
                             ppg_feats = compute_hrv_features(ppi_ms, ppi_times_s)
                             ppi_count = int(len(ppi_ms))
                             spi_ch, comp_ch = compute_sleepiness_index(

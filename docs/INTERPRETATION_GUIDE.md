@@ -167,42 +167,9 @@ Surface these whenever you quote numbers from the dashboard — the methods sect
 
 1. **Sample rate.** Paper claims 750 Hz. Firmware (`fullpipico.py`, `pipico_code/ppgcode/main.py`) calls `set_sample_rate(3200)` with `set_fifo_average(8)`, giving ≈ 400 Hz per channel — further reduced by round-robin servicing across active lanes. The dashboard reports the *actually inferred* fs (typically ~130 Hz per active lane) in the SQI table and in `_grade_ccc_text` notes when fs < 250 Hz.
 2. **ECG R-peak detector.** Paper specifies Pan–Tompkins. `sqi/ccc.py:detect_r_peaks` uses scipy `find_peaks` on a 0.5–40 Hz Butterworth with a 90th-percentile height threshold and auto-flip — *not* Pan–Tompkins. Numbers differ on noisy beats.
-3. **HRV frequency domain.** Paper specifies Lomb–Scargle for LF/HF. The Lomb–Scargle path in `webapp/sleepiness.py` is now the single source of truth and powers the LF/HF values surfaced on the Σ summary page. The legacy `signal_visualization/ppgvis.py` Welch path has been deprecated — it is now an import-raising stub that points consumers at the webapp pipeline. Absolute LF and HF power are reported in **ms²·Hz** (Lomb–Scargle integral over band, not band-width-normalised density); the unit was previously a documentation gap and is now clarified at the call site. Ratios (`lf_nu`, `hf_nu`, `log_lf_hf`) are unaffected because the band-width factor cancels.
-4. **PPG bandpass.** Paper specifies 0.5–4.0 Hz fourth-order zero-phase Butterworth. `sqi/ccc.py:ppg_bandpass(low=0.5, high=4.0, order=4)` now provides the paper-spec filter and is called by the peak-detection path (`detect_ppg_peaks` in `sqi/ccc.py`); this replaces the previous 0–8 Hz lowpass-only used for peak detection. The dashboard's display-overlay `webapp/analysis.py:ppg_bandpass` still defaults to 0.6–3.3 Hz, order 2 — migration to the canonical paper-spec filter (design-spec item F3) is partially complete; the duplicate `butter()` call has not yet been removed. Until that finishes the displayed PPG overlay and the filter the peak detector sees differ slightly.
+3. **HRV frequency domain.** Paper specifies Lomb–Scargle for LF/HF. `webapp/analysis.py` now computes LF/HF per channel via `pyhrv.welch_psd` (Welch on cubic-spline-resampled NN) so the per-session HR/SDNN/LF-HF agreement tables match the canonical `old/PPGanalysis.py` pipeline; the legacy `signal_visualization/ppgvis.py` has been deprecated and replaced with an import-raising stub.
+4. **PPG bandpass.** Paper specifies 0.5–4.0 Hz fourth-order zero-phase Butterworth. `sqi/ccc.py:ppg_bandpass(low=0.5, high=4.0, order=4)` is the canonical paper-spec filter and is used by the peak-detection path (`detect_ppg_peaks_bp` inside `webapp/analysis.py`); the dashboard's display-overlay `webapp/analysis.py:ppg_bandpass` delegates to it so the same waveform feeds detection and display.
 5. **Per-site Bland–Altman across the cohort.** Now wired by the dashboard's batch view (per-site aggregate table), but the FST × site cross-tab the manuscript promises is blocked until participant.json carries a Fitzpatrick grade for every session. The batch view's meta-grid shows `FST strata: unavailable` until at least one session has FST saved.
-
----
-
-## Per-HRV-feature CCC (Σ page)
-
-The Σ summary page now reports per-HRV-feature CCC across the cohort,
-separately from the per-RR-interval CCC shown on the per-session detail
-page. The two are complementary:
-
-- **Per-RR-interval CCC** (per-session detail) — tests beat-to-beat timing
-  agreement between PPG and ECG. Sensitive to peak-detector quality.
-- **Per-HRV-feature CCC** (Σ page) — tests whether PPG reproduces the
-  clinical HRV summary statistics (SDNN, RMSSD, LF/HF, etc.). Sensitive
-  to whole-recording physiological fidelity.
-
-**Unit of analysis.** One (ECG_feature, PPG_feature) point per (channel,
-session) pair. Aggregated two ways:
-- **Overall** — all channels of all sessions pooled together; n ≈ sessions × channels
-- **Per-site** — channels grouped by their `channel_sites` mapping
-
-**Thresholds.** Same Lin 1989 / Cicchetti 1994 cuts as the per-RR CCC.
-
-**Sample-size guards.**
-| n     | Treatment |
-|-------|-----------|
-| n < 4 | CCC undefined; row muted, value rendered "—" |
-| 4 ≤ n < 10 | CCC shown but `n` cell highlighted amber as a small-sample caveat |
-| n ≥ 10 | Normal rendering |
-
-**Implementation.** `webapp/sleepiness.py:_aggregate_per_feature`. Driven
-by the same `compute_hrv_features` that powers the SPI composite — so
-the per-feature CCC and the SPI are computed on identical feature
-vectors.
 
 ---
 
