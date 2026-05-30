@@ -22,6 +22,16 @@ import glob
 import os
 import re
 
+# pyhrv.welch_psd (and pingouin) build throwaway matplotlib figures during
+# analysis. This runs on uvicorn worker threads, so the default interactive
+# Tk backend creates Tk objects off the main thread — their garbage-collected
+# __del__ then raises "main thread is not in main loop" and the process-killing
+# "Tcl_AsyncDelete: async handler deleted by the wrong thread". Pin the headless
+# Agg backend before any import can pull in pyplot. Must precede the pyhrv /
+# pingouin / sqi imports below.
+import matplotlib
+matplotlib.use("Agg")
+
 import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d

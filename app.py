@@ -17,12 +17,19 @@ Optional environment variables:
 """
 
 import os
+
+# Force matplotlib's headless Agg backend before any webapp module (which
+# imports pyhrv/pingouin, and through them pyplot) loads. Analysis runs on
+# uvicorn worker threads; the default Tk backend would create Tk objects off
+# the main thread and crash with Tcl_AsyncDelete. See webapp/analysis.py.
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 import threading
 import webbrowser
 
 import uvicorn
-     
-from webapp.api import app   # re-exported here for `uvicorn app:app` users too     
+
+from webapp.api import app   # re-exported here for `uvicorn app:app` users too
 
 
 def _open_browser(url, delay_s=1.2):
