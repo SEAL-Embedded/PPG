@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>SEAL · PPG — Acquisition &amp; Analysis</title>
-<link rel="stylesheet" href="/static/style.css?v=20260526a">
+<link rel="stylesheet" href="/static/style.css?v=20260529a">
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
 <body>
@@ -86,6 +86,9 @@
       <input id="session-filter" placeholder="Filter by ID or date…">
     </div>
     <button id="btn-analyze-all" class="primary mini" title="Run SSQI / ZSQI / CCC / ICC across every session in MDPIdata/ and aggregate by body site">▦ Analyze all sessions</button>
+    <label class="batch-window-toggle" title="When on, each session is cropped to its own saved best window instead of one shared window. Sessions with no saved window use their full length.">
+      <input type="checkbox" id="use-saved-windows"> Use each session's best window
+    </label>
     <div class="batch-archive-row" id="batch-archive-row">
       <span class="label">Past batch runs <span class="count" id="batch-archive-count">0</span></span>
       <button id="btn-browse-archive" class="browse-btn" disabled title="Browse previously saved batch analyses">Browse archive</button>
@@ -285,6 +288,7 @@
             <input id="win-end" type="number" step="1" min="0" placeholder="end">
             <button id="btn-win-apply" class="ghost mini">Apply</button>
             <button id="btn-win-full" class="ghost mini">Full</button>
+            <button id="btn-win-save" class="ghost mini" title="Save the current window as this session's best window — batch analysis uses it when 'use saved windows' is on">★ Save as best</button>
           </div>
           <div class="spacer"></div>
           <span class="muted mono" id="analysis-status"></span>
@@ -444,6 +448,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260528d"></script>
+<script src="/static/app.js?v=20260529a"></script>
 </body>
 </html>

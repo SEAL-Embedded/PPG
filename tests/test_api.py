@@ -281,6 +281,84 @@ class TestMetadataEndpoint:
         assert r.status_code == 400
 
 
+# ── /api/sessions/{name}/window ─────────────────────────────────────────────
+
+class TestWindowEndpoint:
+
+    def test_get_default_is_none_bounds(self, client, synth_session):
+        name, _, _ = synth_session
+        r = client.get(f"/api/sessions/{name}/window")
+        assert r.status_code == 200
+        assert r.json() == {"start_s": None, "end_s": None}
+
+    def test_post_saves_window_and_appends_history(
+            self, client, synth_session):
+        name, _, _ = synth_session
+        r = client.post(f"/api/sessions/{name}/window",
+                         params={"start_s": 5.0, "end_s": 15.0})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["window"] == {"start_s": 5.0, "end_s": 15.0}
+
+        # Persisted, and a get reflects it.
+        r2 = client.get(f"/api/sessions/{name}/window")
+        assert r2.json() == {"start_s": 5.0, "end_s": 15.0}
+
+        # History event appended.
+        events = sessions.read_history(name)
+        assert "best_window_saved" in [e["event"] for e in events]
+
+    def test_post_no_bounds_clears_window(self, client, synth_session):
+        name, _, _ = synth_session
+        sessions.save_session_window(name, 5.0, 15.0)
+        r = client.post(f"/api/sessions/{name}/window")
+        assert r.status_code == 200
+        assert r.json()["window"] == {"start_s": None, "end_s": None}
+
+    def test_invalid_name(self, client):
+        r = client.get("/api/sessions/bad_name/window")
+        assert r.status_code == 400
+        r = client.post("/api/sessions/bad_name/window",
+                        params={"start_s": 1.0})
+        assert r.status_code == 400
+
+    def test_nonexistent_session_returns_404(self, client):
+        r = client.get("/api/sessions/session_99990101_000000/window")
+        assert r.status_code == 404
+
+
+# ── POST /api/analyze_all?use_saved_windows ─────────────────────────────────
+
+class TestAnalyzeAllSavedWindows:
+
+    def test_crops_each_session_to_its_saved_window(
+            self, client, synth_session):
+        name, _, _ = synth_session  # synthetic session is 30 s long
+        sessions.save_session_window(name, 5.0, 15.0)
+        r = client.post("/api/analyze_all",
+                        params={"use_saved_windows": "true"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["use_saved_windows"] is True
+        assert body["crop_window"] == {"per_session": True}
+
+        sx = body["sessions"][0]
+        assert sx["crop_window"] == {"start_s": 5.0, "end_s": 15.0}
+        assert sx["ecg"]["duration_s"] == pytest.approx(10.0, abs=0.2)
+
+    def test_session_without_window_uses_full_length(
+            self, client, synth_session):
+        name, _, _ = synth_session
+        # No window saved — batch must fall back to full length.
+        r = client.post("/api/analyze_all",
+                        params={"use_saved_windows": "true"})
+        assert r.status_code == 200
+        sx = r.json()["sessions"][0]
+        assert sx["crop_window"] == {"start_s": None, "end_s": None}
+        assert sx["ecg"]["duration_s"] == pytest.approx(30.0, abs=0.5)
+
+
 # ── GET /api/sessions/{name}/signals (sanity, not deep) ────────────────────
 
 class TestSignalsEndpoint:

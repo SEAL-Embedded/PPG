@@ -369,3 +369,61 @@ class TestParticipantMetadata:
         # Explicit site preserved, others defaulted.
         assert meta["channel_sites"]["0"] == "thumb"
         assert meta["channel_sites"]["1"] == "earlobe"
+
+
+# ── Per-session "best window" ───────────────────────────────────────────────
+
+class TestSessionWindow:
+
+    def test_missing_window_returns_none_bounds(self, synth_session):
+        name, _, _ = synth_session
+        assert sessions.get_session_window(name) == {
+            "start_s": None, "end_s": None}
+
+    def test_save_then_get_round_trips(self, synth_session):
+        name, _, _ = synth_session
+        sessions.save_session_window(name, 5.0, 15.0)
+        assert sessions.get_session_window(name) == {
+            "start_s": 5.0, "end_s": 15.0}
+        # File actually written.
+        assert os.path.isfile(
+            os.path.join(sessions.session_path(name),
+                         sessions.WINDOW_FILENAME))
+
+    def test_open_bound_persists_as_none(self, synth_session):
+        name, _, _ = synth_session
+        sessions.save_session_window(name, None, 20.0)
+        assert sessions.get_session_window(name) == {
+            "start_s": None, "end_s": 20.0}
+
+    def test_both_none_clears_saved_window(self, synth_session):
+        name, _, _ = synth_session
+        sessions.save_session_window(name, 5.0, 15.0)
+        sessions.save_session_window(name, None, None)
+        # File removed, get reverts to None bounds.
+        assert not os.path.isfile(
+            os.path.join(sessions.session_path(name),
+                         sessions.WINDOW_FILENAME))
+        assert sessions.get_session_window(name) == {
+            "start_s": None, "end_s": None}
+
+    def test_clear_when_none_saved_is_noop(self, synth_session):
+        name, _, _ = synth_session
+        # Clearing with nothing saved must not raise.
+        sessions.save_session_window(name, None, None)
+        assert sessions.get_session_window(name) == {
+            "start_s": None, "end_s": None}
+
+    def test_corrupt_window_file_returns_none_bounds(self, synth_session):
+        name, _, _ = synth_session
+        with open(os.path.join(sessions.session_path(name),
+                               sessions.WINDOW_FILENAME), "w") as f:
+            f.write("{ not json")
+        assert sessions.get_session_window(name) == {
+            "start_s": None, "end_s": None}
+
+    def test_summarize_session_includes_saved_window(self, synth_session):
+        name, _, _ = synth_session
+        sessions.save_session_window(name, 3.0, 12.0)
+        summary = sessions.summarize_session(name)
+        assert summary["window"] == {"start_s": 3.0, "end_s": 12.0}

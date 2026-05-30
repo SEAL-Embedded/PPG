@@ -1190,7 +1190,7 @@ def _hr_agreement_per_channel(per_session):
     return rows
 
 
-def analyze_all_sessions(start_s=None, end_s=None):
+def analyze_all_sessions(start_s=None, end_s=None, use_saved_windows=False):
     """Run analyze_session on every session_*/ folder under MDPIdata/.
 
     Per-session payloads keep the same shape the single-session endpoint
@@ -1198,6 +1198,13 @@ def analyze_all_sessions(start_s=None, end_s=None):
     extra ``session_name`` field tagged on each result row so the
     per-site aggregator can count distinct sessions per site without
     re-fetching the session list.
+
+    When ``use_saved_windows`` is True, each session is cropped to its own
+    saved "best window" (sessions.get_session_window) instead of the
+    global ``start_s``/``end_s`` — a session with no saved window falls
+    back to its full length. This lets one batch compare session X over
+    30-330 s against session Y over 100-400 s. The window actually applied
+    to each session is recorded on its payload as ``crop_window``.
 
     ``fst_unavailable`` flags whether *any* session carried a
     Fitzpatrick grade — when False, an FST × site cross-tab would be
@@ -1210,8 +1217,13 @@ def analyze_all_sessions(start_s=None, end_s=None):
     failed = []
     any_fst = False
     for s in summaries:
+        if use_saved_windows:
+            w = sessions.get_session_window(s["name"])
+            s_start, s_end = w.get("start_s"), w.get("end_s")
+        else:
+            s_start, s_end = start_s, end_s
         try:
-            r = analyze_session(s["name"], start_s=start_s, end_s=end_s)
+            r = analyze_session(s["name"], start_s=s_start, end_s=s_end)
         except Exception as e:
             failed.append({"name": s["name"], "error": str(e)})
             continue
@@ -1224,6 +1236,9 @@ def analyze_all_sessions(start_s=None, end_s=None):
             row["_session_name"] = s["name"]
         r["session_name"] = s["name"]
         r["started_at"] = s.get("started_at")
+        # Record the window actually applied so the per-session table can
+        # show which span each row was scored over.
+        r["crop_window"] = {"start_s": s_start, "end_s": s_end}
         fst = (r.get("participant") or {}).get("fitzpatrick")
         if fst:
             any_fst = True
@@ -1243,7 +1258,9 @@ def analyze_all_sessions(start_s=None, end_s=None):
         "sdnn_per_channel":     sdnn_per_channel,
         "lfhf_per_channel":     lfhf_per_channel,
         "fst_unavailable":      not any_fst,
-        "crop_window": {"start_s": start_s, "end_s": end_s},
+        "use_saved_windows":    use_saved_windows,
+        "crop_window": ({"per_session": True} if use_saved_windows
+                        else {"start_s": start_s, "end_s": end_s}),
         "interpretation":       interpret_batch(per_session, per_site, failed, not any_fst),
     }
 

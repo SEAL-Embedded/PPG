@@ -93,6 +93,25 @@ def post_metadata(name: str, meta: ParticipantMetadata):
     return {"ok": True}
 
 
+@app.get("/api/sessions/{name}/window")
+def get_session_window(name: str):
+    _require_session(name)
+    return sessions.get_session_window(name)
+
+
+@app.post("/api/sessions/{name}/window")
+def post_session_window(name: str, start_s: Optional[float] = None,
+                        end_s: Optional[float] = None):
+    """Save (or clear) this session's "best window". Both bounds omitted
+    clears the saved window so batch reverts to full-length for it."""
+    _require_session(name)
+    sessions.save_session_window(name, start_s, end_s)
+    sessions.append_history(name, "best_window_saved", {
+        "start_s": start_s, "end_s": end_s,
+    })
+    return {"ok": True, "window": sessions.get_session_window(name)}
+
+
 @app.delete("/api/sessions/{name}")
 def delete_session(name: str):
     _require_session(name)
@@ -178,8 +197,10 @@ def analyze_session(name: str, start_s: Optional[float] = None,
 # semantics as the single-session endpoint — start_s/end_s are seconds
 # since each session's ECG t0, applied independently per session.
 @app.post("/api/analyze_all")
-def analyze_all(start_s: Optional[float] = None, end_s: Optional[float] = None):
-    result = analysis.analyze_all_sessions(start_s=start_s, end_s=end_s)
+def analyze_all(start_s: Optional[float] = None, end_s: Optional[float] = None,
+                use_saved_windows: bool = False):
+    result = analysis.analyze_all_sessions(
+        start_s=start_s, end_s=end_s, use_saved_windows=use_saved_windows)
     # Save the batch snapshot under MDPIdata/batch_analyses/. The helper
     # mutates result with batch_id + created_at so what we return and
     # what's on disk are byte-identical.

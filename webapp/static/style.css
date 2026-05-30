@@ -1097,6 +1097,16 @@ button.mini { padding: 5px 10px; font-size: 11px; }
 .batch-archive-row .browse-btn:hover { color: var(--ink); border-color: var(--ink-mute); background: var(--panel-2); }
 .batch-archive-row .browse-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+.batch-window-toggle {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0 0 14px;
+  font-family: var(--mono); font-size: 11px;
+  color: var(--ink-mute);
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+.batch-window-toggle input { cursor: pointer; margin: 0; }
+
 .batch-archive-tag {
   display: inline-flex; align-items: center; gap: 6px;
   margin-left: 10px;

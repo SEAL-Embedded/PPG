@@ -14,7 +14,18 @@
       "Bash(python *)",
       "Bash(pip show *)",
       "PowerShell(py *)",
-      "PowerShell(foreach \\($v in '3.14','3.13','3.12'\\) { $has = & py -$v -c \"import numpy,scipy,pandas;print\\('ok'\\)\" 2>$null; if \\($?\\) { \"$v -> $has\" } else { \"$v -> missing\" } })"
+      "PowerShell(foreach \\($v in '3.14','3.13','3.12'\\) { $has = & py -$v -c \"import numpy,scipy,pandas;print\\('ok'\\)\" 2>$null; if \\($?\\) { \"$v -> $has\" } else { \"$v -> missing\" } })",
+      "Bash(awk 'NF && $0 !~ /^[[:space:]]*\\\\.\\\\.\\\\.[[:space:]]*$/' /c/Research/PPG/webapp/static/app.js)",
+      "Bash(grep -cE \"^\\\\s*\\\\.\\\\.\\\\.\\\\s*$\" /c/Research/PPG/webapp/static/app.js)",
+      "Bash(xxd)",
+      "Bash(awk 'NR>=1193 && NR<=1360' /c/Research/PPG/webapp/analysis.py)",
+      "Bash(py *)",
+      "Bash(echo \"exit: $?\")",
+      "PowerShell(Get-ChildItem C:\\\\Research\\\\PPG -Filter \"test_*.py\" -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName; Write-Output \"---pytest?---\"; python -m pytest --version 2>&1)",
+      "PowerShell(python -m pip install pytest -q 2>&1 | Select-Object -Last 3)",
+      "PowerShell(python -m pytest C:\\\\Research\\\\PPG\\\\tests -q 2>&1 | Select-Object -Last 35)",
+      "PowerShell(python -m pytest C:\\\\Research\\\\PPG\\\\tests\\\\test_sessions.py C:\\\\Research\\\\PPG\\\\tests\\\\test_api.py -q 2>&1 | Select-Object -Last 30)",
+      "PowerShell(python -m pytest C:\\\\Research\\\\PPG\\\\tests -q 2>&1 | Select-Object -Last 5)"
     ]
   }
 }

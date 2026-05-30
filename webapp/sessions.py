@@ -28,6 +28,7 @@ PARTICIPANT_FILENAME = "participant.json"
 HISTORY_FILENAME = "history.jsonl"
 ANALYSIS_FILENAME = "analysis.json"
 RECEIVER_LOG_FILENAME = "receiver.log"
+WINDOW_FILENAME = "window.json"
 SESSIONS_SUBDIR = "MDPIdata"
 BATCH_SUBDIR = "batch_analyses"
 SLEEPINESS_SUBDIR = "sleepiness_runs"
@@ -132,6 +133,7 @@ def summarize_session(name, lightweight=False):
         "analysis_count": analysis_count,
         "has_receiver_log": has_receiver_log,
         "history_count": history_count,
+        "window": get_session_window(name),
     }
 
 
@@ -190,6 +192,43 @@ def save_participant_metadata(name, metadata):
     os.makedirs(full, exist_ok=True)
     with open(os.path.join(full, PARTICIPANT_FILENAME), "w") as f:
         json.dump(metadata, f, indent=2)
+
+
+def _window_path(name):
+    return os.path.join(session_path(name), WINDOW_FILENAME)
+
+
+def get_session_window(name):
+    """Return this session's saved "best window" as {start_s, end_s}.
+
+    Both bounds are None when no window.json exists (no best window saved
+    yet) or the file can't be parsed. Used by the batch driver when
+    ``use_saved_windows`` is set, and by the detail view to pre-fill the
+    Window inputs when a session is opened."""
+    path = _window_path(name)
+    if not os.path.isfile(path):
+        return {"start_s": None, "end_s": None}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {"start_s": data.get("start_s"), "end_s": data.get("end_s")}
+    except (IOError, OSError, json.JSONDecodeError):
+        return {"start_s": None, "end_s": None}
+
+
+def save_session_window(name, start_s, end_s):
+    """Persist this session's best window to window.json. A ``None`` bound
+    means "open" on that side. Both None deletes the file, clearing the
+    saved window so the session reverts to full-length in batch."""
+    full = session_path(name)
+    os.makedirs(full, exist_ok=True)
+    path = _window_path(name)
+    if start_s is None and end_s is None:
+        if os.path.isfile(path):
+            os.remove(path)
+        return
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"start_s": start_s, "end_s": end_s}, f, indent=2)
 
 
 def delete_session(name):

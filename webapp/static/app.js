@@ -89,6 +89,7 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btn-bp-all").onclick = toggleAllBandpass;
   $("btn-win-apply").onclick = applyWindow;
   $("btn-win-full").onclick  = clearWindow;
+  $("btn-win-save").onclick  = saveBestWindow;
   ["win-start", "win-end"].forEach(id => {
     $(id).addEventListener("keydown", e => { if (e.key === "Enter") applyWindow(); });
   });
@@ -436,6 +437,14 @@ async function selectSession(name, opts = {}) {
     state.sessionDetail = s;
     renderMeta(s);
     populateMetadataForm(s.participant);
+    // If this session has a saved "best window", load it into the Window
+    // inputs (and the active crop) so the detail view opens on the span
+    // the user marked. Sessions without one keep the window carried over
+    // from the previously viewed session.
+    if (s.window && (s.window.start_s != null || s.window.end_s != null)) {
+      state.window = { start: s.window.start_s, end: s.window.end_s };
+      syncWindowInputs();
+    }
     // Receiver log only meaningful when the file actually exists on disk.
     setEnabled("btn-receiver-log", !!s.has_receiver_log);
     $("btn-receiver-log").title = s.has_receiver_log
@@ -560,6 +569,28 @@ function clearWindow() {
   $("win-end").value = "";
   syncWindowInputs();
   if (state.selectedSession) loadSessionFull(state.selectedSession);
+}
+
+// Persist the current Window inputs as this session's "best window".
+// Batch analysis uses it per-session when "Use each session's best
+// window" is ticked. Saving an empty window clears it (the session
+// reverts to full length in batch).
+async function saveBestWindow() {
+  const name = state.selectedSession;
+  if (!name) { flash("Select a session first."); return; }
+  const { start, end } = state.window;
+  let qs = "";
+  if (start != null) qs += `start_s=${start}&`;
+  if (end != null)   qs += `end_s=${end}`;
+  try {
+    const r = await fetch(`/api/sessions/${name}/window?${qs}`, { method: "POST" });
+    if (!r.ok) throw new Error(await r.text() || r.statusText);
+    const span = (start == null && end == null)
+      ? "full length (cleared)"
+      : `${start ?? "0"}–${end ?? "end"} s`;
+    flash(`Best window saved for this session: ${span}`);
+    if (state.sessionDetail) state.sessionDetail.window = { start_s: start, end_s: end };
+  } catch (e) { flash("Failed to save window: " + e.message); }
 }
 
 // Reflect the active window into the inputs and flag the control as
@@ -1298,7 +1329,10 @@ async function runBatchAnalysis(showBusy) {
 
   let payload;
   try {
-    const r = await fetch(`/api/analyze_all?${windowQS().slice(1)}`, { method: "POST" });
+    const useSaved = $("use-saved-windows") && $("use-saved-windows").checked;
+    const r = await fetch(
+      `/api/analyze_all?${windowQS().slice(1)}${useSaved ? "&use_saved_windows=true" : ""}`,
+      { method: "POST" });
     if (!r.ok) throw new Error(await r.text() || r.statusText);
     payload = await r.json();
   } catch (e) {
@@ -1339,8 +1373,11 @@ function closeBatchView() {
 
 function renderBatchMeta(p) {
   const w = p.crop_window || {};
-  const win = (w.start_s != null || w.end_s != null)
-    ? `${w.start_s ?? "0"}–${w.end_s ?? "end"} s` : "full";
+  const winLabel = p.use_saved_windows
+    ? "per session (best window)"
+    : (w.start_s != null || w.end_s != null)
+      ? `${w.start_s ?? "0"}–${w.end_s ?? "end"} s` : "full";
+  const win = winLabel;
   $("batch-meta").innerHTML = `
     <div class="meta-cell"><div class="k">Sessions</div>
       <div class="v mono">${p.n_sessions_analyzed} / ${p.n_sessions_total}</div></div>
@@ -1685,6 +1722,9 @@ function renderBatchPerChannel(p) {
       fstStr ? `<span class="sess-tag fst">FST <b>${fstStr}</b></span>` : "",
       ecg.mean_hr_bpm ? `<span class="sess-tag">HR <b>${ecg.mean_hr_bpm.toFixed(0)} bpm</b></span>` : "",
       ecg.duration_s ? `<span class="sess-tag">duration <b>${ecg.duration_s.toFixed(1)} s</b></span>` : "",
+      (sx.crop_window && (sx.crop_window.start_s != null || sx.crop_window.end_s != null))
+        ? `<span class="sess-tag">window <b>${sx.crop_window.start_s ?? "0"}–${sx.crop_window.end_s ?? "end"} s</b></span>`
+        : "",
       `<span class="sess-tag">${(sx.results || []).length} channels</span>`,
     ].filter(Boolean).join("");
 
