@@ -48,6 +48,7 @@ from sqi.ccc import (
 )
 from sqi.SSQI_algorithm import Ssqi
 from sqi.zcr_sqi import windowed_zcr
+from sqi.hrv_clean import clean_intervals
 
 from . import sessions
 
@@ -74,6 +75,31 @@ CHANNEL_RE = re.compile(r".*ppg_data_ch(\d+)\.csv$")
 
 # ── Loaders (schema matches PPG_ECG_Full_Unpacking.py output) ────────────────
 
+def _unwrap_ticks_us(ts_us):
+    """Unwrap a MicroPython ticks_us series that may have wrapped at 2^30.
+
+    The Pi Pico's ``ticks_us()`` uses a 30-bit counter that wraps every
+    2^30 microseconds (~17.89 minutes). Any recording longer than that
+    will contain a backward jump in the CSV's first column that poisons
+    every diff-based downstream metric (``infer_fs``,
+    ``peaks_to_intervals``, etc.). This helper detects backward jumps
+    larger than 2^29 (half the wrap period — anything smaller is just
+    out-of-order jitter, not a wrap) and adds the wrap period to all
+    subsequent samples. Returns a monotone float64 array so a later
+    ``/ 1000.0`` to milliseconds keeps full precision.
+    """
+    arr = np.asarray(ts_us, dtype=np.float64)
+    if len(arr) < 2:
+        return arr
+    WRAP = float(1 << 30)
+    THRESH = float(1 << 29)
+    diffs = np.diff(arr)
+    # 1 where a wrap occurred, 0 elsewhere
+    wraps = (diffs < -THRESH).astype(np.float64)
+    offset = np.concatenate([[0.0], np.cumsum(wraps) * WRAP])
+    return arr + offset
+
+
 def load_ppg(path):
     """``ppg_data_ch{N}.csv`` — col0=ts_us, col1=sample (headerless).
 
@@ -85,7 +111,8 @@ def load_ppg(path):
     ts_us = pd.to_numeric(df["ts_us"], errors="coerce").to_numpy(dtype=float)
     sig = pd.to_numeric(df["sample"], errors="coerce").to_numpy(dtype=float)
     valid = ~(np.isnan(ts_us) | np.isnan(sig))
-    return ts_us[valid] / 1000.0, sig[valid]   # return ms, sample
+    ts_us_unwrapped = _unwrap_ticks_us(ts_us[valid])
+    return ts_us_unwrapped / 1000.0, sig[valid]   # return ms, sample
 
 
 def load_ecg(path):
@@ -96,30 +123,25 @@ def load_ecg(path):
     sig = pd.to_numeric(df["sample"], errors="coerce").to_numpy(dtype=float)
     leads_off = pd.to_numeric(df["leads_off"], errors="coerce").to_numpy(dtype=float)
     valid = ~(np.isnan(ts_us) | np.isnan(sig))
-    return ts_us[valid] / 1000.0, sig[valid], leads_off[valid].astype(int)
+    ts_us_unwrapped = _unwrap_ticks_us(ts_us[valid])
+    return ts_us_unwrapped / 1000.0, sig[valid], leads_off[valid].astype(int)
 
 
-def ppg_bandpass(sig, fs, lowcut=0.6, highcut=3.3, order=2):
-    """The cardiac bandpass ppgvis.py applies to PPG: zero-phase
-    Butterworth, 0.6-3.3 Hz, order 2 (signal_visualization/ppgvis.py
-    bandpass()). Filters the full-resolution signal so decimation
-    afterwards preserves the filtered waveform.
+def ppg_bandpass(sig, fs, lowcut=0.5, highcut=4.0, order=4):
+    """Cardiac bandpass overlay for the dashboard PPG view.
 
-    Returns None when the channel's fs/length can't support the filter
-    (NaN fs, cutoffs not below Nyquist, or too few samples for filtfilt)
-    so the front end can grey out that channel's checkbox.
+    Delegates to ``sqi.ccc.ppg_bandpass`` so the display overlay and the
+    PPG peak detector consume the same filtered waveform — peaks the user
+    sees on the dashboard are exactly the peaks the detector ran on.
+
+    The defaults match the paper spec (0.5–4.0 Hz, 4th-order zero-phase
+    Butterworth). The legacy 0.6–3.3 Hz / order-2 path was retired with
+    the rest of the signal-processing cleanup; the kwargs are preserved
+    so any external caller passing them keeps the same parameter
+    semantics.
     """
-    if not np.isfinite(fs) or fs <= 0:
-        return None
-    nyq = 0.5 * fs
-    low, high = lowcut / nyq, highcut / nyq
-    if not (0.0 < low < high < 1.0):
-        return None
-    b, a = butter(order, [low, high], btype="band")
-    # filtfilt's default padlen is 3*max(len(a),len(b)); guard short signals.
-    if len(sig) <= 3 * max(len(a), len(b)):
-        return None
-    return filtfilt(b, a, sig)
+    from sqi.ccc import ppg_bandpass as _ccc_ppg_bandpass
+    return _ccc_ppg_bandpass(sig, fs, low=lowcut, high=highcut, order=order)
 
 
 def infer_fs(ts_ms):
@@ -550,11 +572,27 @@ def load_session_signals(name, max_points=5000, tail_seconds=None,
                 ts_ms, [sig, leads_off], t0_ms, start_s, end_s)
             ts_s = (ts_ms - t0_ms) / 1000.0
             xs, ys = _downsample(ts_s, sig, max_points)
+            # _leads_off_spans runs on the full pre-downsample ts_s,
+            # but the front-end draws those spans on the downsampled
+            # xs trace. The min/max bucket decimator can drop the
+            # first/last sample, leaving xs[0] > ts_s[0] or
+            # xs[-1] < ts_s[-1]. Clamp every span to [xs[0], xs[-1]]
+            # so the red-shaded regions stay inside the visible trace,
+            # and drop spans that collapse to zero or negative width
+            # after clamping.
+            spans = _leads_off_spans(ts_s, leads_off)
+            if len(xs):
+                x_lo, x_hi = float(xs[0]), float(xs[-1])
+                spans = [
+                    [max(s, x_lo), min(e, x_hi)]
+                    for s, e in spans
+                    if max(s, x_lo) <= min(e, x_hi)
+                ]
             ecg_payload = {
                 "name": "ecg",
                 "time_s": xs.tolist(),
                 "signal": ys.tolist(),
-                "leads_off_spans": _leads_off_spans(ts_s, leads_off),
+                "leads_off_spans": spans,
                 "fs_hz": infer_fs(ts_ms),
                 "n_samples": int(len(sig)),
             }
@@ -810,15 +848,26 @@ def analyze_channel(ppg_ts_ms, ppg_sig, ecg_ts_ms, ecg_sig, t0_ms=0.0,
         if ppg_dur_s > 0 and len(ppg_peaks):
             result["mean_hr_bpm"] = float(60.0 * len(ppg_peaks) / ppg_dur_s)
 
-        # Per-channel SDNN (ms) — sample std of the full PPI series; same
+        # Manuscript §2.5: ectopic + outlier rejection on the PP series
+        # before HRV metric extraction. [300, 2000] ms physiological range
+        # gate + Karlsson 1987 ±20% local-median rule (sqi/hrv_clean.py).
+        # The raw ``ppi_ms`` is preserved for the per-RR CCC pipeline so
+        # the matched-beat agreement still reflects detector behaviour.
+        if len(ppi_ms):
+            ppi_clean_ms, _, _ = clean_intervals(ppi_ms, ppi_times)
+        else:
+            ppi_clean_ms = ppi_ms
+
+        # Per-channel SDNN (ms) — sample std of the cleaned NN series; same
         # definition the ECG side uses, so the cross-session SDNN-agreement
         # aggregator can pair them directly.
-        if len(ppi_ms) >= 2:
-            result["sdnn_ms"] = float(np.std(ppi_ms, ddof=1))
+        if len(ppi_clean_ms) >= 2:
+            result["sdnn_ms"] = float(np.std(ppi_clean_ms, ddof=1))
 
-        # Per-channel frequency-domain HRV (pyhrv welch_psd) on the same
-        # full PPI series. Matches old/PPGanalysis.py's LF/HF computation.
-        ppg_fd = _freq_domain_metrics(ppi_ms)
+        # Per-channel frequency-domain HRV (pyhrv welch_psd) on the cleaned
+        # NN series. Matches manuscript §2.6 (Lomb-Scargle / Welch on NN,
+        # not RR).
+        ppg_fd = _freq_domain_metrics(ppi_clean_ms)
         result["vlf_power_ms2"] = ppg_fd["vlf_power_ms2"]
         result["lf_power_ms2"]  = ppg_fd["lf_power_ms2"]
         result["hf_power_ms2"]  = ppg_fd["hf_power_ms2"]
@@ -899,13 +948,20 @@ def analyze_session(name, start_s=None, end_s=None):
     mean_hr = (60.0 * len(ecg_peaks) / duration_s) if (duration_s > 0 and len(ecg_peaks)) else float("nan")
 
     # ECG SDNN (ms) — same definition as Task Force 1996; sample std (ddof=1)
-    # of the RR intervals over the cropped window. Used as the reference
+    # of the NN intervals over the cropped window. Used as the reference
     # value for the SDNN-agreement aggregator.
-    ecg_rr_ms = np.diff(ecg_ts_ms[ecg_peaks]) if len(ecg_peaks) >= 2 else np.array([], dtype=float)
-    ecg_sdnn_ms = float(np.std(ecg_rr_ms, ddof=1)) if len(ecg_rr_ms) >= 2 else float("nan")
+    if len(ecg_peaks) >= 2:
+        ecg_rr_ms = np.diff(ecg_ts_ms[ecg_peaks])
+        ecg_rr_t_s = ecg_ts_ms[ecg_peaks][1:] / 1000.0
+        # Manuscript §2.5: ectopic + outlier rejection on RR before metric
+        # extraction. Range gate + Karlsson 1987 ±20% rule (sqi/hrv_clean.py).
+        ecg_nn_ms, _, _ = clean_intervals(ecg_rr_ms, ecg_rr_t_s)
+    else:
+        ecg_nn_ms = np.array([], dtype=float)
+    ecg_sdnn_ms = float(np.std(ecg_nn_ms, ddof=1)) if len(ecg_nn_ms) >= 2 else float("nan")
 
     # ECG frequency-domain HRV via pyhrv (matches old/PPGanalysis.py).
-    ecg_fd = _freq_domain_metrics(ecg_rr_ms)
+    ecg_fd = _freq_domain_metrics(ecg_nn_ms)
 
     ecg_info = {
         "fs_hz": ecg_fs,

@@ -185,3 +185,88 @@ def synth_signal_arrays():
     _, ppg = _ppg_signal()
     ts_ms = (t * 1000.0).astype(float)
     return {"ts_ms": ts_ms, "ecg": ecg, "ppg": ppg, "fs": 200.0}
+
+
+# ── Adversarial fixtures for sqi/ccc.py bug fixes ─────────────────────────────
+
+@pytest.fixture
+def synth_short_signal():
+    """A 1-sample signal — too short for any filtfilt order."""
+    return np.array([1.0])
+
+
+@pytest.fixture
+def synth_motion_burst_ecg(synth_signal_arrays):
+    """Clean 60 BPM ECG + a 5-s motion burst at +5x amplitude in the middle."""
+    ts_ms = synth_signal_arrays["ts_ms"].copy()
+    ecg = synth_signal_arrays["ecg"].copy()
+    fs = synth_signal_arrays["fs"]
+    burst_start = int(12.0 * fs)
+    burst_end = int(17.0 * fs)
+    rng = np.random.default_rng(99)
+    ecg[burst_start:burst_end] += 5.0 * rng.standard_normal(burst_end - burst_start)
+    return {"ts_ms": ts_ms, "ecg": ecg, "fs": fs}
+
+
+@pytest.fixture
+def synth_inverted_ecg(synth_signal_arrays):
+    """ECG flipped — peaks become troughs."""
+    return {
+        "ts_ms": synth_signal_arrays["ts_ms"],
+        "ecg": -synth_signal_arrays["ecg"],
+        "fs": synth_signal_arrays["fs"],
+    }
+
+
+@pytest.fixture
+def synth_single_spike_ecg(synth_signal_arrays):
+    """Clean ECG plus ONE huge negative spike — must NOT auto-invert the signal."""
+    ts_ms = synth_signal_arrays["ts_ms"].copy()
+    ecg = synth_signal_arrays["ecg"].copy()
+    fs = synth_signal_arrays["fs"]
+    spike_idx = int(5.0 * fs)
+    ecg[spike_idx] = -10.0 * float(np.max(ecg))
+    return {"ts_ms": ts_ms, "ecg": ecg, "fs": fs}
+
+
+@pytest.fixture
+def synth_fast_hr_ecg():
+    """180 BPM (3 Hz) synthetic ECG at 200 Hz fs, 30 s."""
+    fs = 200.0
+    duration_s = 30.0
+    hr_bpm = 180.0
+    n = int(duration_s * fs)
+    t = np.arange(n) / fs
+    sig = 0.05 * np.cos(2 * np.pi * 0.3 * t)
+    rng = np.random.default_rng(13)
+    period_s = 60.0 / hr_bpm
+    pt = period_s
+    sigma_s = 0.012
+    while pt < duration_s:
+        sig += 1.0 * np.exp(-((t - pt) ** 2) / (2 * sigma_s ** 2))
+        pt += period_s + 0.005 * rng.standard_normal()
+    ts_ms = (t * 1000.0).astype(float)
+    return {"ts_ms": ts_ms, "ecg": sig, "fs": fs}
+
+
+@pytest.fixture
+def synth_amplitude_drift_ppg(synth_signal_arrays):
+    """Clean PPG that doubles in amplitude in the second half."""
+    ppg = synth_signal_arrays["ppg"].copy()
+    half = len(ppg) // 2
+    ppg[half:] = ppg[half:] * 2.0
+    return {
+        "ts_ms": synth_signal_arrays["ts_ms"],
+        "ppg": ppg,
+        "fs": synth_signal_arrays["fs"],
+    }
+
+
+@pytest.fixture
+def synth_inverted_ppg(synth_signal_arrays):
+    """PPG flipped — systolic peaks become troughs."""
+    return {
+        "ts_ms": synth_signal_arrays["ts_ms"],
+        "ppg": -synth_signal_arrays["ppg"],
+        "fs": synth_signal_arrays["fs"],
+    }

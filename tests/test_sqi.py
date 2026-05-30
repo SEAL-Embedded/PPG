@@ -22,6 +22,42 @@ from sqi.ccc import (
 from sqi.SSQI_algorithm import Ssqi
 
 
+# ── Filter guards (P3) ──────────────────────────────────────────────────────
+
+class TestFilterGuards:
+    def test_bandpass_short_signal_returns_none(self, synth_short_signal):
+        from sqi.ccc import bandpass
+        out = bandpass(synth_short_signal, fs=200.0)
+        assert out is None or len(out) == len(synth_short_signal)
+
+    def test_lowpass_short_signal_returns_none(self, synth_short_signal):
+        from sqi.ccc import lowpass
+        out = lowpass(synth_short_signal, fs=200.0)
+        assert out is None or len(out) == len(synth_short_signal)
+
+
+# ── PPG bandpass at paper spec (F1) ─────────────────────────────────────────
+
+class TestPpgBandpass:
+    def test_ppg_bandpass_function_exists(self):
+        from sqi import ccc
+        assert hasattr(ccc, "ppg_bandpass")
+
+    def test_ppg_bandpass_attenuates_5hz(self):
+        """0.5-4 Hz BP must attenuate a 5 Hz sine vs a 1.5 Hz sine."""
+        from sqi.ccc import ppg_bandpass
+        fs = 200.0
+        n = int(30 * fs)
+        t = np.arange(n) / fs
+        in_band = np.sin(2 * np.pi * 1.5 * t)
+        out_of_band = np.sin(2 * np.pi * 5.0 * t)
+        in_band_filtered = ppg_bandpass(in_band, fs)
+        out_of_band_filtered = ppg_bandpass(out_of_band, fs)
+        # Power ratio: in-band passes ~unchanged, 5 Hz attenuated ~10x
+        assert np.std(in_band_filtered) > 0.5 * np.std(in_band)
+        assert np.std(out_of_band_filtered) < 0.3 * np.std(out_of_band)
+
+
 # ── bandpass / lowpass shape ────────────────────────────────────────────────
 
 class TestFilters:

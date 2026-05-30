@@ -264,6 +264,9 @@ class TestMetadataEndpoint:
         meta = sessions.load_participant_metadata(name)
         assert meta["participant_id"] == "P123"
         assert meta["fitzpatrick"] == 4
+        # Notes survive the round-trip exactly as posted — guards against
+        # any future merge-logic regression that drops the field.
+        assert meta["notes"] == "hello"
         # Explicit override survives the default-fill merge.
         assert meta["channel_sites"]["0"] == "thumb"
 
@@ -279,6 +282,22 @@ class TestMetadataEndpoint:
         r = client.post("/api/sessions/bad/metadata",
                          json={"participant_id": "X"})
         assert r.status_code == 400
+
+    def test_metadata_endpoint_blank_notes_does_not_erase_saved_notes(
+        self, isolated_sessions_root, synth_session
+    ):
+        from fastapi.testclient import TestClient
+        from webapp.api import app
+        client = TestClient(app)
+        name, _, _ = synth_session
+        client.post(f"/api/sessions/{name}/metadata",
+                    json={"participant_id": "P001", "fitzpatrick": 3,
+                          "notes": "important note", "channel_sites": {"0": "finger"}})
+        client.post(f"/api/sessions/{name}/metadata",
+                    json={"participant_id": "P001", "fitzpatrick": 3,
+                          "notes": "", "channel_sites": {"0": "finger"}})
+        r = client.get(f"/api/sessions/{name}")
+        assert r.json()["participant"]["notes"] == "important note"
 
 
 # ── /api/sessions/{name}/window ─────────────────────────────────────────────

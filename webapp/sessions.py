@@ -188,10 +188,51 @@ def load_participant_metadata(name):
 
 
 def save_participant_metadata(name, metadata):
+    """Read-merge-write so a blank-field payload doesn't erase a prior
+    value. Recording-start fires this with an empty notes box; if we
+    overwrote unconditionally, the participant's pre-recording notes
+    would silently vanish. Merge rules:
+
+    - Read the raw participant.json (NOT load_participant_metadata,
+      which would dump all five DEFAULT_CHANNEL_SITES into the file).
+    - For each key in the incoming payload: an empty string or None is
+      treated as "leave existing alone"; ``channel_sites`` deep-merges
+      so a partial site update keeps the others; everything else
+      overrides.
+    """
     full = session_path(name)
     os.makedirs(full, exist_ok=True)
-    with open(os.path.join(full, PARTICIPANT_FILENAME), "w") as f:
-        json.dump(metadata, f, indent=2)
+    path = os.path.join(full, PARTICIPANT_FILENAME)
+
+    # Load existing raw JSON (no default-site fill). Swallow parse and
+    # I/O errors so a corrupt file never blocks writing fresh metadata.
+    existing = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, "r") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                existing = loaded
+        except (IOError, OSError, json.JSONDecodeError):
+            existing = {}
+
+    merged = dict(existing)
+    for k, v in (metadata or {}).items():
+        if k == "channel_sites" and isinstance(v, dict):
+            base = dict(merged.get("channel_sites") or {})
+            base.update(v)
+            merged[k] = base
+        elif isinstance(v, str) and v.strip() == "":
+            # Blank string: don't clobber a previously saved value.
+            continue
+        elif v is None:
+            # Explicit None: don't clobber either.
+            continue
+        else:
+            merged[k] = v
+
+    with open(path, "w") as f:
+        json.dump(merged, f, indent=2)
 
 
 def _window_path(name):

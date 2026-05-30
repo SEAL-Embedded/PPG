@@ -13,6 +13,9 @@ This document explains every signal-quality metric the dashboard reports, the li
 7. [Channel verdict roll-up](#channel-verdict-roll-up)
 8. [Site verdict roll-up](#site-verdict-roll-up)
 9. [Known code-vs-manuscript gaps](#known-code-vs-manuscript-gaps)
+10. [Per-HRV-feature CCC (Σ page)](#per-hrv-feature-ccc-σ-page)
+11. [Ectopic-beat / NN-interval cleaning](#ectopic-beat--nn-interval-cleaning)
+12. [ticks_us rollover unwrap](#ticks_us-rollover-unwrap)
 
 ---
 
@@ -164,6 +167,43 @@ Surface these whenever you quote numbers from the dashboard — the methods sect
 
 1. **Sample rate.** Paper claims 750 Hz. Firmware (`fullpipico.py`, `pipico_code/ppgcode/main.py`) calls `set_sample_rate(3200)` with `set_fifo_average(8)`, giving ≈ 400 Hz per channel — further reduced by round-robin servicing across active lanes. The dashboard reports the *actually inferred* fs (typically ~130 Hz per active lane) in the SQI table and in `_grade_ccc_text` notes when fs < 250 Hz.
 2. **ECG R-peak detector.** Paper specifies Pan–Tompkins. `sqi/ccc.py:detect_r_peaks` uses scipy `find_peaks` on a 0.5–40 Hz Butterworth with a 90th-percentile height threshold and auto-flip — *not* Pan–Tompkins. Numbers differ on noisy beats.
-3. **HRV frequency domain.** Paper specifies Lomb–Scargle for LF/HF. The only LF/HF code path (`signal_visualization/ppgvis.py`) uses Welch on a 4 Hz cubic-interpolated RR series. The dashboard does not currently surface LF/HF.
-4. **PPG bandpass.** Paper specifies 0.5–4.0 Hz fourth-order zero-phase Butterworth. `sqi/ccc.py:detect_ppg_peaks` uses a 2nd-order lowpass at 8 Hz. The dashboard's bandpass overlay uses 0.6–3.3 Hz (matching the legacy `ppgvis.py`). All three differ.
+3. **HRV frequency domain.** Paper specifies Lomb–Scargle for LF/HF. `webapp/analysis.py` now computes LF/HF per channel via `pyhrv.welch_psd` (Welch on cubic-spline-resampled NN) so the per-session HR/SDNN/LF-HF agreement tables match the canonical `old/PPGanalysis.py` pipeline; the legacy `signal_visualization/ppgvis.py` has been deprecated and replaced with an import-raising stub.
+4. **PPG bandpass.** Paper specifies 0.5–4.0 Hz fourth-order zero-phase Butterworth. `sqi/ccc.py:ppg_bandpass(low=0.5, high=4.0, order=4)` is the canonical paper-spec filter and is used by the peak-detection path (`detect_ppg_peaks_bp` inside `webapp/analysis.py`); the dashboard's display-overlay `webapp/analysis.py:ppg_bandpass` delegates to it so the same waveform feeds detection and display.
 5. **Per-site Bland–Altman across the cohort.** Now wired by the dashboard's batch view (per-site aggregate table), but the FST × site cross-tab the manuscript promises is blocked until participant.json carries a Fitzpatrick grade for every session. The batch view's meta-grid shows `FST strata: unavailable` until at least one session has FST saved.
+
+---
+
+## Ectopic-beat / NN-interval cleaning
+
+All HRV features (SDNN, RMSSD, LF/HF, SampEn, Poincaré) are now computed
+on cleaned NN intervals, not raw RR/PPI intervals. Cleaning happens in
+`sqi/hrv_clean.py:clean_intervals` via a two-pass filter:
+
+1. **Physiological range gate** — drop intervals outside [300, 2000] ms
+   (200 BPM .. 30 BPM).
+2. **Karlsson 1987 local-median rule** — drop intervals differing by
+   more than 20% from a 5-beat rolling median.
+
+Reference: Karlsson, M. et al. (1987). *Computers and Biomedical Research*
+20(4), 333-340.
+
+Without this step, one missed beat or one ectopic complex inflates SDNN
+by a factor of 5-10 and contaminates every downstream HRV feature. The
+legacy `signal_visualization/ppgvis.py` had ad-hoc median-ratio filters
+that were dropped in the dashboard rewrite — this module restores that
+defensive layer with a clean, tested implementation.
+
+---
+
+## ticks_us rollover unwrap
+
+MicroPython on the RP2040 uses a 30-bit `ticks_us()` counter that wraps
+at 2^30 µs (~17.89 minutes). The receiver writes raw values to CSV; any
+continuous recording longer than the wrap period would have shown a
+~1.07-billion-µs backward step at the boundary, poisoning every
+downstream metric.
+
+`webapp/analysis.py:_unwrap_ticks_us` now detects backward steps larger
+than 2^29 µs and adds the wrap period cumulatively, restoring monotone
+timestamps. Old CSVs that crossed the wrap before this fix landed will
+be unwrapped automatically on next load.

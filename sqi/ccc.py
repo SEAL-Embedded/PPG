@@ -44,17 +44,62 @@ from scipy.signal import find_peaks, butter, filtfilt
 # ── Filtering ────────────────────────────────────────────────────────────────
 
 def bandpass(signal, fs, low=0.5, high=40.0, order=2):
-    """Butterworth bandpass to remove baseline wander and high-freq noise."""
+    """Butterworth bandpass to remove baseline wander and high-freq noise.
+
+    Returns ``None`` when the input is too short for ``filtfilt`` (which
+    would otherwise raise). The ``padlen`` scipy uses is roughly
+    ``3*max(len(a), len(b))``; we use a conservative ``> 3 * order * 3``
+    guard that always lets honest signals through.
+    """
+    signal = np.asarray(signal)
     nyq = fs / 2.0
     b, a = butter(order, [low / nyq, high / nyq], btype='band')
+    padlen = 3 * max(len(a), len(b))
+    if len(signal) <= padlen:
+        return None
     return filtfilt(b, a, signal)
 
 
 def lowpass(signal, fs, cutoff=8.0, order=2):
-    """Butterworth lowpass for PPG (removes motion noise above 8 Hz)."""
+    """Butterworth lowpass for PPG (removes motion noise above 8 Hz).
+
+    Returns ``None`` when the input is too short for ``filtfilt``.
+    """
+    signal = np.asarray(signal)
     nyq = fs / 2.0
     b, a = butter(order, cutoff / nyq, btype='low')
+    padlen = 3 * max(len(a), len(b))
+    if len(signal) <= padlen:
+        return None
     return filtfilt(b, a, signal)
+
+
+def ppg_bandpass(sig, fs, low=0.5, high=4.0, order=4):
+    """Paper-spec PPG bandpass: 0.5-4.0 Hz, 4th-order zero-phase Butterworth.
+
+    This is the canonical PPG filter used for both peak detection and any
+    downstream display so consumers don't drift on filter parameters.
+    The 0.5 Hz HP strips baseline wander; the 4 Hz LP keeps the cardiac
+    fundamental (~1 Hz) and its first harmonic but rejects motion-band
+    energy and >5 Hz noise.
+
+    Returns ``None`` when the filter can't be constructed for this
+    channel — invalid fs, cutoffs outside the (0, Nyquist) range, or a
+    signal shorter than ``filtfilt``'s padlen. Callers (display overlay,
+    peak detector) use the None return to grey out / skip the channel.
+    """
+    sig = np.asarray(sig)
+    if not np.isfinite(fs) or fs <= 0:
+        return None
+    nyq = fs / 2.0
+    low_norm, high_norm = low / nyq, high / nyq
+    if not (0.0 < low_norm < high_norm < 1.0):
+        return None
+    b, a = butter(order, [low_norm, high_norm], btype='band')
+    padlen = 3 * max(len(a), len(b))
+    if len(sig) <= padlen:
+        return None
+    return filtfilt(b, a, sig)
 
 
 # ── Peak detection ────────────────────────────────────────────────────────────
@@ -92,10 +137,10 @@ def detect_r_peaks(ecg, fs):
 
 def detect_ppg_peaks(ppg, fs):
     """
-    Detect systolic peaks in a lowpass-filtered PPG signal.
+    Detect systolic peaks in a bandpass-filtered PPG signal.
 
     Strategy:
-      - Lowpass filter (8 Hz) to smooth motion noise
+      - Paper-spec bandpass (0.5-4 Hz, 4th-order) via ``ppg_bandpass``
       - find_peaks with minimum distance = 0.4s
         and prominence threshold to reject small oscillations
 
@@ -108,7 +153,11 @@ def detect_ppg_peaks(ppg, fs):
     -------
     peaks : np.ndarray  -- sample indices of systolic peaks
     """
-    filtered = lowpass(ppg, fs, cutoff=8.0)
+    filtered = ppg_bandpass(ppg, fs)
+    # If the signal was too short for the bandpass guard, there's nothing
+    # to peak-detect — return empty so callers don't have to special-case it.
+    if filtered is None:
+        return np.array([], dtype=int)
     min_distance = int(0.4 * fs)
     prominence_thresh = np.std(filtered) * 0.5
     peaks, _ = find_peaks(filtered, distance=min_distance, prominence=prominence_thresh)

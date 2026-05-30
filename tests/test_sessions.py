@@ -370,6 +370,64 @@ class TestParticipantMetadata:
         assert meta["channel_sites"]["0"] == "thumb"
         assert meta["channel_sites"]["1"] == "earlobe"
 
+    def test_save_metadata_preserves_existing_notes_when_blank_payload_arrives(
+        self, isolated_sessions_root, synth_session
+    ):
+        name, _, _ = synth_session
+        # First save: notes populated
+        sessions.save_participant_metadata(name, {
+            "participant_id": "P001", "fitzpatrick": 3,
+            "notes": "sleep-deprived volunteer",
+            "channel_sites": {"0": "finger"},
+        })
+        # Second save: blank notes (simulates Start Recording with empty form)
+        sessions.save_participant_metadata(name, {
+            "participant_id": "P001", "fitzpatrick": 3,
+            "notes": "",
+            "channel_sites": {"0": "finger"},
+        })
+        loaded = sessions.load_participant_metadata(name)
+        assert loaded["notes"] == "sleep-deprived volunteer"
+
+    def test_save_metadata_overrides_notes_when_non_blank_payload_arrives(
+        self, isolated_sessions_root, synth_session
+    ):
+        name, _, _ = synth_session
+        sessions.save_participant_metadata(name, {"notes": "first"})
+        sessions.save_participant_metadata(name, {"notes": "second"})
+        loaded = sessions.load_participant_metadata(name)
+        assert loaded["notes"] == "second"
+
+    def test_save_metadata_preserves_keys_not_in_payload(
+        self, isolated_sessions_root, synth_session
+    ):
+        name, _, _ = synth_session
+        sessions.save_participant_metadata(name, {
+            "participant_id": "P001", "fitzpatrick": 3, "notes": "n",
+            "channel_sites": {"0": "finger", "1": "earlobe"},
+        })
+        # Partial payload — only participant_id
+        sessions.save_participant_metadata(name, {"participant_id": "P002"})
+        loaded = sessions.load_participant_metadata(name)
+        assert loaded["participant_id"] == "P002"
+        assert loaded["fitzpatrick"] == 3
+        assert loaded["notes"] == "n"
+        assert loaded["channel_sites"]["0"] == "finger"
+
+    def test_save_metadata_channel_sites_deep_merge(
+        self, isolated_sessions_root, synth_session
+    ):
+        name, _, _ = synth_session
+        sessions.save_participant_metadata(name, {
+            "channel_sites": {"0": "finger", "1": "earlobe"},
+        })
+        sessions.save_participant_metadata(name, {
+            "channel_sites": {"1": "wrist"},  # only update ch1
+        })
+        loaded = sessions.load_participant_metadata(name)
+        assert loaded["channel_sites"]["0"] == "finger"  # preserved
+        assert loaded["channel_sites"]["1"] == "wrist"   # updated
+
 
 # ── Per-session "best window" ───────────────────────────────────────────────
 
