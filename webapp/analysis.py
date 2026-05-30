@@ -127,18 +127,16 @@ def load_ecg(path):
     return ts_us_unwrapped / 1000.0, sig[valid], leads_off[valid].astype(int)
 
 
-def ppg_bandpass(sig, fs, lowcut=0.5, highcut=4.0, order=4):
+def ppg_bandpass(sig, fs, lowcut=0.6, highcut=3.3, order=2):
     """Cardiac bandpass overlay for the dashboard PPG view.
 
     Delegates to ``sqi.ccc.ppg_bandpass`` so the display overlay and the
     PPG peak detector consume the same filtered waveform — peaks the user
     sees on the dashboard are exactly the peaks the detector ran on.
 
-    The defaults match the paper spec (0.5–4.0 Hz, 4th-order zero-phase
-    Butterworth). The legacy 0.6–3.3 Hz / order-2 path was retired with
-    the rest of the signal-processing cleanup; the kwargs are preserved
-    so any external caller passing them keeps the same parameter
-    semantics.
+    The defaults match the canonical filter (0.6-3.3 Hz, 2nd-order
+    zero-phase Butterworth); the kwargs are forwarded so any external
+    caller passing them keeps the same parameter semantics.
     """
     from sqi.ccc import ppg_bandpass as _ccc_ppg_bandpass
     return _ccc_ppg_bandpass(sig, fs, low=lowcut, high=highcut, order=order)

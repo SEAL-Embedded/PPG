@@ -74,14 +74,14 @@ def lowpass(signal, fs, cutoff=8.0, order=2):
     return filtfilt(b, a, signal)
 
 
-def ppg_bandpass(sig, fs, low=0.5, high=4.0, order=4):
-    """Paper-spec PPG bandpass: 0.5-4.0 Hz, 4th-order zero-phase Butterworth.
+def ppg_bandpass(sig, fs, low=0.6, high=3.3, order=2):
+    """Canonical PPG bandpass: 0.6-3.3 Hz, 2nd-order zero-phase Butterworth.
 
     This is the canonical PPG filter used for both peak detection and any
     downstream display so consumers don't drift on filter parameters.
-    The 0.5 Hz HP strips baseline wander; the 4 Hz LP keeps the cardiac
+    The 0.6 Hz HP strips baseline wander; the 3.3 Hz LP keeps the cardiac
     fundamental (~1 Hz) and its first harmonic but rejects motion-band
-    energy and >5 Hz noise.
+    energy and higher-frequency noise.
 
     Returns ``None`` when the filter can't be constructed for this
     channel — invalid fs, cutoffs outside the (0, Nyquist) range, or a
@@ -140,7 +140,7 @@ def detect_ppg_peaks(ppg, fs):
     Detect systolic peaks in a bandpass-filtered PPG signal.
 
     Strategy:
-      - Paper-spec bandpass (0.5-4 Hz, 4th-order) via ``ppg_bandpass``
+      - Canonical bandpass (0.6-3.3 Hz, 2nd-order) via ``ppg_bandpass``
       - find_peaks with minimum distance = 0.4s
         and prominence threshold to reject small oscillations
 
