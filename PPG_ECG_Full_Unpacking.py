@@ -31,7 +31,7 @@ import serial
 # PORT / BAUD / SESSION_DIR can be overridden by the webapp launcher via env
 # vars so the same script keeps working when run standalone (the defaults
 # below match the original hardcoded values).
-PORT = os.environ.get("SEAL_PPG_PORT", "COM3")
+PORT = os.environ.get("SEAL_PPG_PORT", "COM4")
 BAUD = int(os.environ.get("SEAL_PPG_BAUD", "115200"))
 
 MAX_PPG_CHANNELS = 8
