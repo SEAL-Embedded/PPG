@@ -86,7 +86,7 @@ Click any session card. The detail column fills with:
 
 - **Header bar** — date/time, meta-grid (`PID / FST / DURATION / CHANNELS / ECG / STARTED`), action buttons.
 - **ECG reference** — full waveform with R-peak markers, red shading over any leads-off intervals. Summary line: sample count, sample rate, R-peak count, mean HR, leads-off samples.
-- **PPG channels** — one card per `ppg_data_ch{N}.csv` with the site label, sample count, fs, detected systolic peak markers, and a `bandpass` checkbox toggling a 0.6–3.3 Hz cardiac-band Butterworth overlay.
+- **PPG channels** — one card per `ppg_data_ch{N}.csv` with the site label, sample count, fs, detected systolic peak markers (Elgendi 2013 TERMA detector), and a `bandpass` checkbox toggling the 0.5–8 Hz cardiac-band Butterworth overlay that detection runs on.
 - **Plain-English interpretation** (described in detail in [§5](#5-plain-english-interpretation)).
 - **SQI & agreement vs ECG** — one row per channel:
 

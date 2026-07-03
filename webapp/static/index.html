@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>SEAL · PPG — Acquisition &amp; Analysis</title>
-<link rel="stylesheet" href="/static/style.css?v=20260529a">
+<link rel="stylesheet" href="/static/style.css?v=20260626a">
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
 <body>
@@ -15,7 +15,6 @@
   <span class="session-chip" id="session-chip"></span>
   <span class="status" id="status"><span class="dot"></span><span id="status-label">idle</span></span>
   <button id="btn-help" class="help-btn" title="Open the onboarding guide" aria-label="Show onboarding guide">?</button>
-  <button id="btn-sleepiness" class="help-btn" title="Total summary — cohort sleepiness proxy across all sessions" aria-label="Open the cohort sleepiness summary">Σ</button>
 </header>
 
 <main id="main">
@@ -165,106 +164,6 @@
           <span class="right" id="batch-per-channel-summary"></span>
         </div>
         <div class="sqi-wrap"><table class="sqi-table" id="batch-per-channel-table"></table></div>
-      </section>
-    </div>
-
-    <!-- Cohort Sleepiness (SPI) view — opened from the Σ button in the header -->
-    <div id="sleepiness" class="hidden">
-      <div class="detail-header">
-        <p class="eyebrow">Total summary · Cohort sleepiness <span id="slp-source-tag"></span></p>
-        <h1 class="detail-title">Sleepiness proxy — multi-site PPG vs ECG</h1>
-        <p class="slp-subtitle">Quality-weighted HRV composite across the canonical sleep-onset signature.</p>
-
-        <div class="action-row">
-          <button id="btn-slp-rerun">Re-run</button>
-          <button id="btn-slp-close" class="ghost">Close</button>
-          <button id="btn-slp-export" class="ghost" title="Download per-site agreement as CSV">⤓ Export CSV</button>
-          <span class="rl" style="margin-left:8px;">weighting</span>
-          <select id="slp-weighting" style="width:auto; min-width:140px;">
-            <option value="ssqi_zsqi" selected>ssqi · zsqi sigmoid</option>
-          </select>
-          <div class="spacer"></div>
-          <span class="muted mono" id="slp-status"></span>
-        </div>
-      </div>
-
-      <!-- Caveats banner — surfaces the dashboard's own honesty about
-           SPI being a literature-derived proxy, not a validated drowsiness
-           classifier. -->
-      <section class="block" id="slp-caveats-block">
-        <div class="slp-caveats">
-          <div class="slp-caveats-head">
-            <span class="slp-caveats-icon" aria-hidden="true">!</span>
-            <span class="slp-caveats-label">Read this first — caveats</span>
-          </div>
-          <ul id="slp-caveats-list"></ul>
-        </div>
-      </section>
-
-      <section class="block" id="slp-cohort-scatter-block">
-        <div class="header-row">
-          <p class="eyebrow">Per-session SPI: PPG vs ECG (one point per site × session)</p>
-          <span class="right" id="slp-cohort-summary"></span>
-        </div>
-        <div id="slp-cohort-plot" class="plot"></div>
-      </section>
-
-      <section class="block" id="slp-per-site-block">
-        <div class="header-row">
-          <p class="eyebrow">Per-site agreement</p>
-          <span class="right" id="slp-per-site-summary"></span>
-        </div>
-        <div class="sqi-wrap"><table class="sqi-table" id="slp-per-site-table"></table></div>
-      </section>
-
-      <section class="block" id="slp-ba-block">
-        <div class="header-row">
-          <p class="eyebrow">Per-site Bland-Altman</p>
-          <span class="right muted">x = (ECG+PPG)/2 · y = PPG − ECG</span>
-        </div>
-        <div class="ba-grid" id="slp-ba-grid"></div>
-      </section>
-
-      <section class="block" id="slp-features-block">
-        <div class="header-row">
-          <p class="eyebrow">HRV feature contributions per site</p>
-          <span class="right muted">mean weighted z-contribution</span>
-        </div>
-        <div id="slp-features-plot" class="plot"></div>
-      </section>
-
-      <section class="block" id="slp-fst-block">
-        <div class="header-row">
-          <p class="eyebrow">FST × site cross-tab</p>
-        </div>
-        <div class="sqi-wrap"><table class="sqi-table" id="slp-fst-table"></table></div>
-      </section>
-
-      <section class="block" id="slp-interp-block">
-        <div class="interp-block" id="slp-interp"></div>
-      </section>
-
-      <section class="block" id="slp-methodology-block">
-        <div class="slp-method">
-          <span class="slp-method-label">Methodology</span>
-          <p>
-            SPI = +0.30·z(log RMSSD) + 0.20·z(log HFnu) − 0.25·z(log LF/HF)
-            − 0.15·z(SampEn) + 0.10·z(SD1/SD2). Cohort z-norm reference is
-            the ECG-derived feature distribution; the same z-stats are applied
-            to PPG features so the two SPIs are on the same scale.
-          </p>
-          <p>
-            Frequency-domain features use Lomb-Scargle periodogram integration
-            over LF (0.04 – 0.15 Hz) and HF (0.15 – 0.40 Hz). Sample entropy:
-            m=2, r=0.2·SDNN. Poincaré: closed-form Brennan 2001. Quality weight:
-            σ(2·(SSQI − 0.5)) · σ(20·(0.05 − ZSQIµ)), clipped to [0.05, 1.0].
-          </p>
-          <p class="slp-method-refs">
-            Burgess 1997 · Boudreau 2013 · Cabiddu 2012 · Yi 2022 · Brennan 2001 ·
-            Tulppo 1996 · Lomb 1976 · Schäfer &amp; Vagedes 2013 · Richman &amp; Moorman 2000 ·
-            Hartmann/Charlton 2019 · Task Force ESC/NASPE 1996.
-          </p>
-        </div>
       </section>
     </div>
 
@@ -448,6 +347,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260529a"></script>
+<script src="/static/app.js?v=20260601b"></script>
 </body>
 </html>

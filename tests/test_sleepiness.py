@@ -15,8 +15,6 @@ import numpy as np
 import pytest
 
 from webapp import sessions, sleepiness
-from webapp.api import app
-from fastapi.testclient import TestClient
 
 
 # ── HRV features on bare RR arrays ──────────────────────────────────────────
@@ -262,50 +260,3 @@ class TestPersistence:
         # read a file outside the sleepiness_runs folder.
         assert sessions.load_sleepiness_run("../../../etc/passwd") is None
         assert sessions.load_sleepiness_run("run_invalid") is None
-
-
-# ── API surface ─────────────────────────────────────────────────────────────
-
-class TestApi:
-
-    def test_post_sleepiness_summary_persists(self, isolated_sessions_root,
-                                                synth_session_with_metadata):
-        client = TestClient(app)
-        r = client.post("/api/sleepiness_summary")
-        assert r.status_code == 200
-        body = r.json()
-        assert "run_id" in body
-        assert "per_session" in body
-        assert "per_site" in body
-        # Run was persisted.
-        runs = sessions.list_sleepiness_runs()
-        assert any(x["run_id"] == body["run_id"] for x in runs)
-        # History event was appended to the synthetic session.
-        sname = synth_session_with_metadata[0]
-        events = sessions.read_history(sname, limit=20)
-        kinds = [e.get("event") for e in events]
-        assert "sleepiness_analysis_included" in kinds
-
-    def test_get_latest_returns_cached_false_when_empty(self,
-                                                          isolated_sessions_root):
-        client = TestClient(app)
-        r = client.get("/api/sleepiness_summary/latest")
-        assert r.status_code == 200
-        assert r.json() == {"cached": False}
-
-    def test_get_latest_returns_saved_run(self, isolated_sessions_root):
-        sessions.save_sleepiness_run({"per_session": [], "weighting": "x"})
-        client = TestClient(app)
-        r = client.get("/api/sleepiness_summary/latest")
-        assert r.status_code == 200
-        assert r.json().get("weighting") == "x"
-
-    def test_get_by_id_404_on_unknown(self, isolated_sessions_root):
-        client = TestClient(app)
-        r = client.get("/api/sleepiness_runs/run_20990101_120000")
-        assert r.status_code == 404
-
-    def test_get_by_id_400_on_malformed(self, isolated_sessions_root):
-        client = TestClient(app)
-        r = client.get("/api/sleepiness_runs/not_a_valid_id")
-        assert r.status_code == 400

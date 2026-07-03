@@ -74,14 +74,14 @@ def lowpass(signal, fs, cutoff=8.0, order=2):
     return filtfilt(b, a, signal)
 
 
-def ppg_bandpass(sig, fs, low=0.6, high=3.3, order=2):
-    """Canonical PPG bandpass: 0.6-3.3 Hz, 2nd-order zero-phase Butterworth.
+def ppg_bandpass(sig, fs, low=0.5, high=8.0, order=2):
+    """Canonical PPG bandpass: 0.5-8 Hz, 2nd-order zero-phase Butterworth.
 
     This is the canonical PPG filter used for both peak detection and any
     downstream display so consumers don't drift on filter parameters.
-    The 0.6 Hz HP strips baseline wander; the 3.3 Hz LP keeps the cardiac
-    fundamental (~1 Hz) and its first harmonic but rejects motion-band
-    energy and higher-frequency noise.
+    The 0.5 Hz HP strips baseline wander; the 8 Hz LP keeps the cardiac
+    fundamental (~1 Hz) plus enough harmonics to preserve systolic peak
+    shape, while still rejecting high-frequency noise.
 
     Returns ``None`` when the filter can't be constructed for this
     channel — invalid fs, cutoffs outside the (0, Nyquist) range, or a
@@ -104,35 +104,81 @@ def ppg_bandpass(sig, fs, low=0.6, high=3.3, order=2):
 
 # ── Peak detection ────────────────────────────────────────────────────────────
 
-def detect_r_peaks(ecg, fs):
-    """
-    Detect R-peaks in a bandpass-filtered ECG signal.
+# R-peak detection parameters. These are *relative* to each recording's own
+# amplitude and rate, so the one detector works on this rig's raw-ADC AD8232
+# ECG (counts in the tens of thousands) and a low-amplitude clean trace alike —
+# no per-recording threshold to re-tune (this is what the old hard-coded
+# height=45000 got wrong: it was an absolute count that worked on some sessions
+# and sat above every R-peak on others).
+_R_REFRACTORY_S = 0.28    # min spacing between beats (caps ~214 bpm); also the
+                          # guard that drops the T-wave following each R-peak
+_R_PROMINENCE_FRAC = 0.35  # peak must stand out by 35% of the robust R-amplitude
 
-    Strategy:
-      - Bandpass filter (0.5-40 Hz) to remove baseline wander
-      - Auto-flip if the lead is inverted (|min| > max after centering)
-      - find_peaks with minimum distance = 0.4s (caps at ~150 BPM)
-        and height threshold derived from the 90th-percentile amplitude
+
+def detect_r_peaks(ecg, fs):
+    """Detect ECG R-peaks by prominence on the raw signal.
+
+    The R-peaks on this rig's seated, ~5-minute, single-lead recordings are
+    high-SNR and very distinct, so the robust thing is also the simple thing:
+    take the local maxima that stand out from the baseline, with three guards
+    that turn "every local maximum" into "R-peaks only":
+
+      1. Polarity — orient the trace from robust 1st/99th percentiles so the
+         R-peak points up, covering an inverted lead. Percentiles (not raw
+         min/max) so one artifact spike can't flip the whole recording.
+      2. Scale-relative threshold — ``find_peaks`` ``prominence`` measured
+         against the recording's own R-amplitude (99th minus 40th percentile
+         of the oriented signal). Prominence is how far a peak rises above the
+         surrounding troughs, so it is inherently immune to baseline wander
+         and DC offset — no absolute count anywhere.
+      3. Refractory spacing — a 0.28 s minimum gap caps the rate near 214 bpm
+         and, because ``find_peaks`` drops the *smaller* of any two peaks
+         inside that window, removes the T-wave that trails each R-peak.
+
+    The returned indices are the local maxima of the (oriented) raw signal,
+    i.e. the actual peak tips — nothing is detected in a filtered domain, so a
+    plotted marker sits exactly on top of its R-peak.
+
+    Note on scope: the heavier reference detectors (Pan-Tompkins 1985 and the
+    like — band-pass, derivative, squaring, moving-window integration, adaptive
+    double threshold, search-back) buy their robustness on *noisy/ambulatory*
+    ECG with baseline drift, motion spikes and varying QRS morphology. None of
+    that applies to these recordings, and their fiducial refinement runs in a
+    band-passed domain that pulls the marker off a sharp tip. Empirically this
+    detector matches a Pan-Tompkins implementation on beat count across the
+    study sessions with equal-or-lower RR-interval variability.
 
     Parameters
     ----------
-    ecg : np.ndarray  -- raw ECG signal
+    ecg : np.ndarray  -- raw ECG signal (any amplitude scale)
     fs  : float       -- sampling frequency (Hz)
 
     Returns
     -------
-    peaks : np.ndarray  -- sample indices of R-peaks
+    peaks : np.ndarray[int]  -- sample indices of R-peaks (empty when fs is
+        invalid or the signal is too short / flat).
     """
-    #filtered = bandpass(ecg, fs, low=0.5, high=40.0)
-    filtered = ecg
-    # Auto-detect polarity: if the negative excursion dominates, the lead is inverted.
-    centered = filtered - np.mean(filtered)
-    if np.abs(centered.min()) > centered.max():
-        filtered = -filtered
-    min_distance  = int(0.22 * fs)         # minimum 300 ms between beats (~200 BPM max)
-    height_thresh = np.percentile(filtered, 90) * 1.25   # 50% of 90th percentile
-    peaks, _ = find_peaks(filtered, distance=min_distance, height=height_thresh)
-    return peaks
+    ecg = np.asarray(ecg, dtype=float)
+    if not np.isfinite(fs) or fs <= 0 or len(ecg) < 3:
+        return np.array([], dtype=int)
+
+    # Orient so R-peaks point up (handles an inverted lead).
+    median = float(np.median(ecg))
+    if abs(np.percentile(ecg, 1) - median) > abs(np.percentile(ecg, 99) - median):
+        oriented = -ecg
+    else:
+        oriented = ecg
+
+    # Robust R-amplitude: top of the R-peaks (99th pct) above the signal bulk
+    # (40th pct, which sits in the baseline/PQ region, not the negative tails).
+    amplitude = float(np.percentile(oriented, 99) - np.percentile(oriented, 40))
+    if not np.isfinite(amplitude) or amplitude <= 0:
+        return np.array([], dtype=int)
+
+    distance = max(1, int(_R_REFRACTORY_S * fs))
+    prominence = _R_PROMINENCE_FRAC * amplitude
+    peaks, _ = find_peaks(oriented, distance=distance, prominence=prominence)
+    return peaks.astype(int)
 
 
 def detect_ppg_peaks(ppg, fs):
@@ -140,7 +186,7 @@ def detect_ppg_peaks(ppg, fs):
     Detect systolic peaks in a bandpass-filtered PPG signal.
 
     Strategy:
-      - Canonical bandpass (0.6-3.3 Hz, 2nd-order) via ``ppg_bandpass``
+      - Canonical bandpass (0.5-8 Hz, 2nd-order) via ``ppg_bandpass``
       - find_peaks with minimum distance = 0.4s
         and prominence threshold to reject small oscillations
 

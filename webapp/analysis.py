@@ -127,14 +127,14 @@ def load_ecg(path):
     return ts_us_unwrapped / 1000.0, sig[valid], leads_off[valid].astype(int)
 
 
-def ppg_bandpass(sig, fs, lowcut=0.6, highcut=3.3, order=2):
+def ppg_bandpass(sig, fs, lowcut=0.5, highcut=8.0, order=2):
     """Cardiac bandpass overlay for the dashboard PPG view.
 
     Delegates to ``sqi.ccc.ppg_bandpass`` so the display overlay and the
     PPG peak detector consume the same filtered waveform — peaks the user
     sees on the dashboard are exactly the peaks the detector ran on.
 
-    The defaults match the canonical filter (0.6-3.3 Hz, 2nd-order
+    The defaults match the canonical filter (0.5-8 Hz, 2nd-order
     zero-phase Butterworth); the kwargs are forwarded so any external
     caller passing them keeps the same parameter semantics.
     """
@@ -153,13 +153,13 @@ def infer_fs(ts_ms):
 #
 # This mirrors the signal conditioning in signal_visualization/ppgvis.py
 # (drop non-monotonic timestamps -> cubic resample onto a uniform grid ->
-# rolling-median outlier removal -> 0.6-3.3 Hz bandpass before peak
+# rolling-median outlier removal -> 0.5-8 Hz bandpass before peak
 # detection) but keeps two things from the original detector that are
 # better on this rig's raw-ADC data: a *scale-relative* prominence
 # (ppgvis's absolute prominence=1.1 is ~0 on counts-in-the-thousands), and
 # interval timing off the *recorded* timestamps rather than the resample
 # grid. SSQI is deliberately NOT computed on the bandpassed signal — the
-# 3.3 Hz cut flattens the pulse toward a sinusoid and washes the skew out.
+# band-pass distorts the pulse shape and skew.
 
 def _drop_non_monotonic(ts_ms, sig):
     """Drop samples whose timestamp doesn't strictly exceed the running max.
@@ -217,33 +217,134 @@ def _remove_outliers(sig, window=15, n_sigma=4.25):
     return out
 
 
+def _filter_doublets(peaks, sig, fs, frac=0.4):
+    """Drop doublet detections, keeping the taller peak of each too-close pair.
+
+    Ported from signal_visualization/ppgvis.py: take the median inter-peak
+    interval, then walk left to right keeping a peak only when it sits more
+    than ``frac * median`` from the last kept peak. When two peaks are too
+    close to be separate beats, keep whichever has the larger amplitude in
+    ``sig`` (the true systolic peak) and drop the other — so a spurious low
+    peak doesn't survive at the expense of the real one, regardless of which
+    came first. ``peaks`` index into ``sig``; intervals use the uniform grid
+    spacing 1/fs."""
+    if len(peaks) < 3:
+        return peaks
+    peak_times = peaks / fs
+    median_rr = float(np.median(np.diff(peak_times)))
+    if not np.isfinite(median_rr) or median_rr <= 0:
+        return peaks
+    kept = [0]   # positions into ``peaks`` of the peaks kept so far
+    for i in range(1, len(peaks)):
+        rr = peak_times[i] - peak_times[kept[-1]]
+        if rr > frac * median_rr:
+            kept.append(i)
+        elif sig[peaks[i]] > sig[peaks[kept[-1]]]:
+            kept[-1] = i
+    return peaks[np.asarray(kept, dtype=int)]
+
+
 def detect_ppg_peaks_bp(sig, fs):
-    """0.6-3.3 Hz bandpass (ppg_bandpass) then find_peaks with a
-    scale-relative prominence (0.5·std of the bandpassed signal) and a
-    0.4·fs minimum spacing (~150 bpm cap). Returns indices into ``sig``."""
+    """0.5-8 Hz bandpass (ppg_bandpass) then find_peaks with a scale-relative
+    prominence (1.1·std of the bandpassed signal) and width 0.13, and a
+    0.5·fs minimum spacing (~120 bpm cap), followed by the ppgvis median-RR
+    doublet filter. Returns indices into ``sig``."""
     bp = ppg_bandpass(sig, fs)
     if bp is None:
         return np.array([], dtype=int)
-    prominence = 0.5 * float(np.std(bp))
+    prominence = 1.1 * float(np.std(bp))
     if not np.isfinite(prominence) or prominence <= 0:
         return np.array([], dtype=int)
-    distance = max(1, int(0.4 * fs))
-    peaks, _ = find_peaks(bp, distance=distance, prominence=prominence)
+    distance = max(1, int(0.5 * fs))
+    peaks, _ = find_peaks(bp, distance=distance, prominence=prominence, width=0.13)
+    peaks = _filter_doublets(peaks, bp, fs)
     return peaks
 
 
-def _grid_peaks_to_orig(grid_peaks, grid_ts_ms, orig_ts_ms):
-    """Map peak indices on the uniform grid back to the nearest *recorded*
-    sample index, so peaks_to_intervals diffs true timestamps instead of
-    the evenly-spaced grid. Returns sorted, unique indices into
-    ``orig_ts_ms``."""
-    if len(grid_peaks) == 0 or len(orig_ts_ms) == 0:
+def _moving_average(x, w):
+    """Centered moving average of window length ``w`` samples, same length as
+    ``x`` (zero-padded at the edges via ``np.convolve(mode="same")``)."""
+    if w <= 1:
+        return np.asarray(x, dtype=float)
+    kernel = np.ones(int(w), dtype=float) / float(w)
+    return np.convolve(np.asarray(x, dtype=float), kernel, mode="same")
+
+
+def detect_ppg_peaks_terma(sig, fs, w1_ms=111.0, w2_ms=667.0, beta=0.02):
+    """Elgendi 2013 systolic-peak detector (two event-related moving averages
+    + offset threshold).
+
+    Reference: Elgendi M, et al. "Systolic Peak Detection in Acceleration
+    Photoplethysmograms Measured from Emergency Responders in Tropical
+    Conditions." PLoS ONE 2013;8(10):e76585.
+
+    Pipeline:
+      1. 0.5-8 Hz bandpass (ppg_bandpass) — shared with detect_ppg_peaks_bp.
+      2. Clip negatives to zero, then square -> emphasises systolic upslopes,
+         suppresses diastolic/noise.
+      3. MA_peak: moving average over ``w1_ms`` (~systolic-peak width).
+         MA_beat: moving average over ``w2_ms`` (~one heartbeat).
+      4. Threshold THR1 = MA_beat + beta*mean(squared); "blocks of interest"
+         are the runs where MA_peak > THR1.
+      5. Reject blocks narrower than ``w1`` (noise); within each surviving
+         block, the index of the max *bandpassed* sample is the systolic peak.
+      6. Small-RR doublet filter (_filter_doublets, frac=0.6): drop peaks
+         closer than 0.6*median to the last kept peak, keeping the taller.
+
+    Unlike the find_peaks detector this needs no prominence/distance tuning —
+    the threshold adapts to the local signal level. Returns indices into
+    ``sig``."""
+    bp = ppg_bandpass(sig, fs)
+    if bp is None:
         return np.array([], dtype=int)
-    peak_ms = np.asarray(grid_ts_ms)[grid_peaks]
-    idx = np.clip(np.searchsorted(orig_ts_ms, peak_ms), 1, len(orig_ts_ms) - 1)
-    pick_left = (peak_ms - orig_ts_ms[idx - 1]) <= (orig_ts_ms[idx] - peak_ms)
-    out = np.where(pick_left, idx - 1, idx)
-    return np.unique(out.astype(int))
+
+    # Step 2: clip + square.
+    clipped = np.clip(bp, 0.0, None)
+    squared = clipped * clipped
+
+    w1 = max(1, int(round(w1_ms / 1000.0 * fs)))
+    w2 = max(1, int(round(w2_ms / 1000.0 * fs)))
+    if len(squared) <= w2:
+        return np.array([], dtype=int)
+
+    # Step 3 + 4: two moving averages and the adaptive threshold.
+    ma_peak = _moving_average(squared, w1)
+    ma_beat = _moving_average(squared, w2)
+    alpha = beta * float(np.mean(squared))
+    blocks = ma_peak > (ma_beat + alpha)
+
+    # Step 5: keep blocks at least w1 wide; take the bandpassed max in each.
+    peaks = []
+    n = len(blocks)
+    i = 0
+    while i < n:
+        if not blocks[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and blocks[j]:
+            j += 1
+        if (j - i) >= w1:
+            peaks.append(i + int(np.argmax(bp[i:j])))
+        i = j
+    peaks = np.asarray(peaks, dtype=int)
+    # Same small-RR doublet filter as the ppgvis pipeline: drop peaks whose
+    # interval from the last kept peak is below 0.6*median, keeping the taller
+    # of any too-close pair (amplitude on the bandpassed signal).
+    return _filter_doublets(peaks, bp, fs, frac=0.6)
+
+
+# Active PPG peak detector. "terma" = Elgendi 2013 adaptive two-moving-average
+# detector (detect_ppg_peaks_terma); set to "prominence" to revert to the
+# scale-relative find_peaks detector (detect_ppg_peaks_bp).
+PPG_PEAK_DETECTOR = "terma"
+
+
+def _detect_ppg_peaks(sig, fs):
+    """Dispatch to the active PPG peak detector (see ``PPG_PEAK_DETECTOR``)."""
+    if PPG_PEAK_DETECTOR == "terma":
+        return detect_ppg_peaks_terma(sig, fs)
+    return detect_ppg_peaks_bp(sig, fs)
 
 
 # ── Windowed HR agreement (within a single session) ─────────────────────────
@@ -552,6 +653,12 @@ def load_session_signals(name, max_points=5000, tail_seconds=None,
     ``start_s`` / ``end_s`` apply the user's pre-processing crop
     (seconds since the session origin t0). The crop happens before the
     bandpass, so the displayed bandpass matches the cropped window.
+
+    Each PPG channel is returned as the *interpolated* signal — conditioned
+    exactly like ``analyze_channel`` (drop non-monotonic timestamps -> cubic
+    resample to a uniform grid -> rolling-median outlier scrub) — so the peak
+    markers, which analyze_channel times in grid seconds, sit on the same
+    trace they were detected on rather than on the raw samples.
     """
     sdir = sessions.session_path(name)
     if not os.path.isdir(sdir):
@@ -606,11 +713,21 @@ def load_session_signals(name, max_points=5000, tail_seconds=None,
         ts_ms, (sig,) = _crop_window(ts_ms, [sig], t0_ms, start_s, end_s)
         if not len(ts_ms):
             continue
-        ts_s = (ts_ms - t0_ms) / 1000.0
+        n_recorded = int(len(sig))
+        # Condition exactly like analyze_channel so the displayed trace IS the
+        # signal the peaks were detected on: drop backward-stepping timestamps
+        # -> cubic resample onto a uniform grid -> rolling-median outlier
+        # scrub. The peak markers (timed in grid seconds by analyze_channel)
+        # then sit on this interpolated trace instead of having their Y pulled
+        # from the raw samples.
+        ts_ms, sig = _drop_non_monotonic(ts_ms, sig)
         fs = infer_fs(ts_ms)
-        xs, ys = _downsample(ts_s, sig, max_points)
+        grid_ts_ms, grid_sig = _resample_uniform(ts_ms, sig, fs)
+        clean_sig = _remove_outliers(grid_sig)
+        ts_s = (grid_ts_ms - t0_ms) / 1000.0
+        xs, ys = _downsample(ts_s, clean_sig, max_points)
 
-        bp = ppg_bandpass(sig, fs)
+        bp = ppg_bandpass(clean_sig, fs)
         if bp is not None:
             xb, yb = _downsample(ts_s, bp, max_points)
             bp_x, bp_y = xb.tolist(), yb.tolist()
@@ -625,7 +742,7 @@ def load_session_signals(name, max_points=5000, tail_seconds=None,
             "time_bp_s": bp_x,
             "signal_bp": bp_y,
             "fs_hz": fs,
-            "n_samples": int(len(sig)),
+            "n_samples": n_recorded,
         })
 
     return {"ecg": ecg_payload, "channels": channels}
@@ -824,13 +941,14 @@ def analyze_channel(ppg_ts_ms, ppg_sig, ecg_ts_ms, ecg_sig, t0_ms=0.0,
     # Peak detection + agreement.
     try:
         ecg_peaks = detect_r_peaks(ecg_sig, ecg_fs) if not np.isnan(ecg_fs) else np.array([], dtype=int)
-        # Detect on the bandpassed uniform grid, then map peaks back to the
-        # nearest recorded timestamp so the intervals use true timing.
-        grid_peaks = detect_ppg_peaks_bp(clean_sig, ppg_fs) if not np.isnan(ppg_fs) else np.array([], dtype=int)
-        ppg_peaks = _grid_peaks_to_orig(grid_peaks, grid_ts_ms, ppg_ts_ms)
+        # Detect on the bandpassed uniform grid. Peak times come from the
+        # grid's own (evenly spaced, real-time) axis, keeping the sub-sample
+        # timing the cubic resample recovered — no snap back to the nearest
+        # recorded sample, which would re-quantize PPI to the raw spacing.
+        ppg_peaks = _detect_ppg_peaks(clean_sig, ppg_fs) if not np.isnan(ppg_fs) else np.array([], dtype=int)
 
         rr_ms, rr_times = peaks_to_intervals(ecg_peaks, ecg_ts_ms) if len(ecg_peaks) else (np.array([]), np.array([]))
-        ppi_ms, ppi_times = peaks_to_intervals(ppg_peaks, ppg_ts_ms) if len(ppg_peaks) else (np.array([]), np.array([]))
+        ppi_ms, ppi_times = peaks_to_intervals(ppg_peaks, grid_ts_ms) if len(ppg_peaks) else (np.array([]), np.array([]))
 
         matched_rr, matched_ppi = match_intervals(rr_ms, rr_times, ppi_ms, ppi_times)
 
@@ -873,7 +991,7 @@ def analyze_channel(ppg_ts_ms, ppg_sig, ecg_ts_ms, ecg_sig, t0_ms=0.0,
 
         if len(ppg_peaks):
             result["ppg_peak_times_s"] = (
-                (ppg_ts_ms[ppg_peaks] - t0_ms) / 1000.0
+                (grid_ts_ms[ppg_peaks] - t0_ms) / 1000.0
             ).tolist()
 
         if len(matched_rr) >= 2:

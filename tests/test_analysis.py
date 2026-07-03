@@ -71,13 +71,13 @@ class TestPpgBandpass:
 
     def test_too_short_returns_none(self):
         # filtfilt padlen = 3*max(len(a), len(b)) = 15 for the
-        # 0.6-3.3 Hz Butterworth order-2 we use; signal must be <= 15.
+        # 0.5-8 Hz Butterworth order-2 we use; signal must be <= 15.
         sig = np.ones(10)
         assert analysis.ppg_bandpass(sig, fs=200.0) is None
 
     def test_cutoffs_above_nyquist_return_none(self):
         sig = np.ones(2000)
-        # fs=1 Hz means Nyquist=0.5 Hz; default highcut=3.3 Hz is above it.
+        # fs=1 Hz means Nyquist=0.5 Hz; default highcut=8.0 Hz is above it.
         assert analysis.ppg_bandpass(sig, fs=1.0) is None
 
 

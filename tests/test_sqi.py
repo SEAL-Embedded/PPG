@@ -43,17 +43,17 @@ class TestPpgBandpass:
         from sqi import ccc
         assert hasattr(ccc, "ppg_bandpass")
 
-    def test_ppg_bandpass_attenuates_5hz(self):
-        """0.5-4 Hz BP must attenuate a 5 Hz sine vs a 1.5 Hz sine."""
+    def test_ppg_bandpass_attenuates_15hz(self):
+        """0.5-8 Hz BP must attenuate a 15 Hz sine vs a 1.5 Hz sine."""
         from sqi.ccc import ppg_bandpass
         fs = 200.0
         n = int(30 * fs)
         t = np.arange(n) / fs
         in_band = np.sin(2 * np.pi * 1.5 * t)
-        out_of_band = np.sin(2 * np.pi * 5.0 * t)
+        out_of_band = np.sin(2 * np.pi * 15.0 * t)
         in_band_filtered = ppg_bandpass(in_band, fs)
         out_of_band_filtered = ppg_bandpass(out_of_band, fs)
-        # Power ratio: in-band passes ~unchanged, 5 Hz attenuated ~10x
+        # Power ratio: in-band passes ~unchanged, 15 Hz attenuated ~10x
         assert np.std(in_band_filtered) > 0.5 * np.std(in_band)
         assert np.std(out_of_band_filtered) < 0.3 * np.std(out_of_band)
 

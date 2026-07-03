@@ -15,9 +15,15 @@ MDPIdata/sleepiness_runs/*.json
 # Nested historical clone (separate .git)
 sqi/PPG/
 
+# Local demo scratch — not part of the published pipeline
+demo/
+
 # Harness / agent lock files
 .claude/scheduled_tasks.lock
 .claude/tasks.lock
+
+# Per-machine Claude Code permissions — local paths, never share
+.claude/settings.local.json
 
 # Editor / OS
 .vscode/

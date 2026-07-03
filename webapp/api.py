@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 import serial.tools.list_ports
 
-from . import analysis, recorder, sessions, sleepiness
+from . import analysis, recorder, sessions
 
 app = FastAPI(title="SEAL PPG Acquisition & Analysis")
 
@@ -188,8 +188,7 @@ def analyze_session(name: str, start_s: Optional[float] = None,
     result = analysis.analyze_session(name, start_s=start_s, end_s=end_s)
     _persist_session_analysis(name, result, start_s, end_s)
     # NaN (e.g. stats.icc with no pingouin / <4 matched beats) is not JSON
-    # compliant under Starlette's allow_nan=False; coerce to null like the
-    # sleepiness endpoints do.
+    # compliant under Starlette's allow_nan=False; coerce to null.
     return sessions._coerce_jsonable(result)
 
 
@@ -256,72 +255,6 @@ def get_batch_analysis(batch_id: str):
     if payload is None:
         raise HTTPException(404, f"batch not found: {batch_id}")
     return payload
-
-
-# ── Cohort sleepiness summary (SPI) ─────────────────────────────────────────
-
-@app.post("/api/sleepiness_summary")
-def post_sleepiness_summary(weighting: str = "ssqi_zsqi",
-                            start_s: Optional[float] = None,
-                            end_s: Optional[float] = None):
-    """Compute the cohort sleepiness proxy (SPI) across MDPIdata/.
-
-    Same crop-window semantics as `/api/analyze_all`. Persists the full
-    payload to ``MDPIdata/sleepiness_runs/run_<ts>.json`` and appends a
-    ``sleepiness_analysis_included`` event to each contributing session's
-    ``history.jsonl`` so the per-session timeline knows the session
-    contributed to a cohort run.
-    """
-    result = sleepiness.analyze_sleepiness(weighting=weighting,
-                                            start_s=start_s, end_s=end_s)
-    result = sessions.save_sleepiness_run(result)
-    run_id = result.get("run_id")
-    per_session_list = result.get("per_session") or []
-    total = len(per_session_list)
-    for i, s in enumerate(per_session_list, start=1):
-        sname = s.get("session_name")
-        if not sname:
-            continue
-        sessions.append_history(sname, "sleepiness_analysis_included", {
-            "run_id": run_id,
-            "session_position": i,
-            "total": total,
-            "ppg_spi_weighted": s.get("ppg_spi_weighted"),
-            "ecg_spi": (s.get("ecg") or {}).get("spi"),
-            "usable": s.get("usable"),
-        })
-    # Coerce NaN/Inf to None so the JSON we return is parseable by
-    # strict consumers (the frontend uses fetch().json() which rejects
-    # bare NaN tokens). The on-disk file is already coerced by
-    # save_sleepiness_run.
-    return sessions._coerce_jsonable(result)
-
-
-@app.get("/api/sleepiness_summary/latest")
-def get_sleepiness_summary_latest():
-    """Return the most-recent saved sleepiness-SPI run, or
-    ``{"cached": false}`` when no run has been saved yet."""
-    payload = sessions.load_latest_sleepiness_run()
-    if payload is None:
-        return {"cached": False}
-    return sessions._coerce_jsonable(payload)
-
-
-@app.get("/api/sleepiness_runs")
-def get_sleepiness_runs():
-    """List saved sleepiness runs (shallow rows, newest first)."""
-    return sessions.list_sleepiness_runs()
-
-
-@app.get("/api/sleepiness_runs/{run_id}")
-def get_sleepiness_run(run_id: str):
-    if not sessions.SLEEPINESS_PATTERN.match(run_id):
-        raise HTTPException(400, "invalid sleepiness run id")
-    payload = sessions.load_sleepiness_run(run_id)
-    if payload is None:
-        raise HTTPException(404, f"sleepiness run not found: {run_id}")
-    return sessions._coerce_jsonable(payload)
-
 
 # ── Recording lifecycle ──────────────────────────────────────────────────────
 

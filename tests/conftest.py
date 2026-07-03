@@ -53,9 +53,9 @@ def _ecg_signal(duration_s=30.0, fs=200.0, hr_bpm=60.0, noise=0.01,
                  seed=42):
     """Build a synthetic ECG: slow baseline cosine + sharp Gaussian
     R-peaks at the requested heart-rate (with realistic jitter so
-    interval statistics are non-degenerate). detect_r_peaks bandpasses
-    0.5-40 Hz with auto-flip and a 90th-percentile-based height
-    threshold; these peaks clear that easily."""
+    interval statistics are non-degenerate). detect_r_peaks finds peaks by
+    relative prominence, so these unit-scale R-peaks are detected just as
+    well as the tens-of-thousands ADC counts the real rig produces."""
     rng = np.random.default_rng(seed)
     n = int(duration_s * fs)
     t = np.arange(n) / fs
