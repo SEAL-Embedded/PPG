@@ -413,7 +413,11 @@ async function selectSession(name, opts = {}) {
   setEnabled("btn-analyze", true);
   setEnabled("btn-reload-signals", true);
   setEnabled("btn-save-meta", true);
-  syncWindowInputs();   // window persists across sessions; show it
+  // Each session's crop window is independent: default to the full signal
+  // and only apply a window below if this specific session has one saved.
+  // Do not carry over the previous session's window.
+  state.window = { start: null, end: null };
+  syncWindowInputs();
 
   // Reset the per-session interpretation + history UI for the new session.
   $("session-interp-block").classList.add("hidden");
@@ -430,8 +434,8 @@ async function selectSession(name, opts = {}) {
     populateMetadataForm(s.participant);
     // If this session has a saved "best window", load it into the Window
     // inputs (and the active crop) so the detail view opens on the span
-    // the user marked. Sessions without one keep the window carried over
-    // from the previously viewed session.
+    // the user marked. Sessions without one already default to the full
+    // signal, reset above.
     if (s.window && (s.window.start_s != null || s.window.end_s != null)) {
       state.window = { start: s.window.start_s, end: s.window.end_s };
       syncWindowInputs();
@@ -459,7 +463,11 @@ async function selectSession(name, opts = {}) {
     $("ba-block").classList.add("hidden");
     pollLiveSignals(name);
   } else {
-    await loadSessionFull(name);
+    // Opening a session (as opposed to an explicit re-run) tries the
+    // cached analysis.json first -- avoids re-paying pingouin's ICC cost
+    // (the dominant cost in /analyze, ~1s per PPG channel) just to
+    // redisplay numbers nothing has changed since the last run.
+    await loadSessionFull(name, { tryCache: true });
   }
 }
 
@@ -485,7 +493,7 @@ function windowQS() {
   return qs;
 }
 
-async function loadSessionFull(name) {
+async function loadSessionFull(name, opts = {}) {
   // Kick signals + analysis in parallel; render whichever returns first.
   // Both carry the same crop window so the plots and the SQI/CCC table
   // describe exactly the same span of data.
@@ -493,7 +501,9 @@ async function loadSessionFull(name) {
   setStatus("analyzing", "analyzing");
   const w = windowQS();
   const sigP = fetch(`/api/sessions/${name}/signals?max_points=25000${w}`).then(r => r.json());
-  const anaP = fetch(`/api/sessions/${name}/analyze?${w.slice(1)}`, {method:"POST"}).then(r => r.json());
+  const anaP = opts.tryCache
+    ? loadAnalysisPreferCache(name, w)
+    : fetch(`/api/sessions/${name}/analyze?${w.slice(1)}`, {method:"POST"}).then(r => r.json());
 
   const [sig, ana] = await Promise.all([
     sigP.catch(e => ({error: e.message})),
@@ -505,6 +515,32 @@ async function loadSessionFull(name) {
   setStatus("idle", "idle");
   $("analysis-status").textContent = "";
   renderEverything();
+}
+
+// Session-open path only: reuse the persisted analysis.json when it was
+// computed on exactly the crop window we're about to show, instead of
+// re-running the full SQI/CCC/ICC pipeline (pingouin's ICC alone runs
+// ~1s per PPG channel) just to redisplay numbers nothing has changed.
+// Falls back to a fresh POST /analyze on any miss -- no cache yet,
+// window doesn't match, or the cache read itself failed.
+async function loadAnalysisPreferCache(name, w) {
+  try {
+    const r = await fetch(`/api/sessions/${name}/analysis`);
+    const cached = r.ok ? await r.json() : null;
+    if (cached && cached.cached !== false && cacheMatchesWindow(cached)) {
+      return cached;
+    }
+  } catch { /* fall through to a fresh run */ }
+  return fetch(`/api/sessions/${name}/analyze?${w.slice(1)}`, {method:"POST"}).then(r => r.json());
+}
+
+// A cached analysis.json is only safe to reuse when it was computed on
+// exactly the crop window we're about to display -- otherwise the SQI/CCC
+// table would silently describe a different span than the plots.
+function cacheMatchesWindow(cached) {
+  const cw = cached.crop_window || {};
+  const { start, end } = state.window;
+  return (cw.start_s ?? null) === (start ?? null) && (cw.end_s ?? null) === (end ?? null);
 }
 
 // Reload only the signal traces (ECG + PPG) for the current crop window,
@@ -1344,6 +1380,7 @@ async function runBatchAnalysis(showBusy) {
   renderBatchHrAgreement(payload);
   renderBatchSdnnAgreement(payload);
   renderBatchLfhfAgreement(payload);
+  renderBatchStrata(payload);
   renderBatchPerChannel(payload);
   refreshBatchArchives();  // a fresh run added one to the archive
 }
@@ -1550,13 +1587,10 @@ function renderHrvCompareTable() {
 }
 
 
-function renderBatchHrAgreement(p) {
-  const tbl = $("batch-hr-table");
-  const rows = (p && p.hr_per_channel) || [];
-  $("batch-hr-summary").textContent = rows.length
-    ? `${rows.length} channels · CCC/ICC/Bland-Altman on per-session mean HR`
-    : "";
-
+// Builders return the full <thead>/<tbody> HTML for one agreement table
+// given its rows. The main batch view and each skin-stratified copy share
+// them so the columns and formatting stay identical.
+function hrAgreementTableHTML(rows) {
   let html = `<thead><tr>
     <th>Ch</th><th>Site</th><th>n</th>
     <th>ECG HR (bpm)</th><th>PPG HR (bpm)</th>
@@ -1565,7 +1599,7 @@ function renderBatchHrAgreement(p) {
     <th>RMSE / MAE (bpm)</th>
   </tr></thead><tbody>`;
   if (!rows.length) {
-    html += `<tr><td colspan="11" class="muted">no HR data — run a batch first</td></tr>`;
+    html += `<tr><td colspan="11" class="muted">no HR data</td></tr>`;
   }
   const f = (v, d=3) => (v == null || !isFinite(v)) ? "—" : (+v).toFixed(d);
   const f1 = v => f(v, 1);
@@ -1593,18 +1627,10 @@ function renderBatchHrAgreement(p) {
       <td class="mono">${f2(r.rmse_bpm)} / ${f2(r.mae_bpm)}</td>
     </tr>`;
   }
-  html += `</tbody>`;
-  tbl.innerHTML = html;
+  return html + `</tbody>`;
 }
 
-
-function renderBatchSdnnAgreement(p) {
-  const tbl = $("batch-sdnn-table");
-  const rows = (p && p.sdnn_per_channel) || [];
-  $("batch-sdnn-summary").textContent = rows.length
-    ? `${rows.length} channels · CCC/ICC/Bland-Altman on per-session SDNN`
-    : "";
-
+function sdnnAgreementTableHTML(rows) {
   let html = `<thead><tr>
     <th>Ch</th><th>Site</th><th>n</th>
     <th>ECG SDNN (ms)</th><th>PPG SDNN (ms)</th>
@@ -1613,7 +1639,7 @@ function renderBatchSdnnAgreement(p) {
     <th>RMSE / MAE (ms)</th>
   </tr></thead><tbody>`;
   if (!rows.length) {
-    html += `<tr><td colspan="11" class="muted">no SDNN data — run a batch first</td></tr>`;
+    html += `<tr><td colspan="11" class="muted">no SDNN data</td></tr>`;
   }
   const f = (v, d=3) => (v == null || !isFinite(v)) ? "—" : (+v).toFixed(d);
   const f1 = v => f(v, 1);
@@ -1641,18 +1667,10 @@ function renderBatchSdnnAgreement(p) {
       <td class="mono">${f2(r.rmse_ms)} / ${f2(r.mae_ms)}</td>
     </tr>`;
   }
-  html += `</tbody>`;
-  tbl.innerHTML = html;
+  return html + `</tbody>`;
 }
 
-
-function renderBatchLfhfAgreement(p) {
-  const tbl = $("batch-lfhf-table");
-  const rows = (p && p.lfhf_per_channel) || [];
-  $("batch-lfhf-summary").textContent = rows.length
-    ? `${rows.length} channels · CCC/ICC/Bland-Altman on per-session LF/HF (pyhrv welch_psd)`
-    : "";
-
+function lfhfAgreementTableHTML(rows) {
   let html = `<thead><tr>
     <th>Ch</th><th>Site</th><th>n</th>
     <th>ECG LF/HF</th><th>PPG LF/HF</th>
@@ -1661,7 +1679,7 @@ function renderBatchLfhfAgreement(p) {
     <th>RMSE / MAE</th>
   </tr></thead><tbody>`;
   if (!rows.length) {
-    html += `<tr><td colspan="11" class="muted">no LF/HF data — run a batch first</td></tr>`;
+    html += `<tr><td colspan="11" class="muted">no LF/HF data</td></tr>`;
   }
   const f = (v, d=3) => (v == null || !isFinite(v)) ? "—" : (+v).toFixed(d);
   const f2 = v => f(v, 2);
@@ -1688,8 +1706,107 @@ function renderBatchLfhfAgreement(p) {
       <td class="mono">${f(r.rmse)} / ${f(r.mae)}</td>
     </tr>`;
   }
-  html += `</tbody>`;
-  tbl.innerHTML = html;
+  return html + `</tbody>`;
+}
+
+// Static (non-sortable) per-site table for the stratified copies. Same
+// columns as SITE_COLS / renderBatchPerSite, without the sort glyphs.
+function perSiteTableStaticHTML(sites) {
+  const ths = SITE_COLS.map(c => `<th>${c.label}</th>`).join("");
+  let html = `<thead><tr>${ths}</tr></thead><tbody>`;
+  if (!sites.length) {
+    html += `<tr><td colspan="${SITE_COLS.length}" class="muted">no sessions in this group</td></tr>`;
+  }
+  sites.forEach(row => {
+    const cccCls = gradeCCC(row.ccc?.mean);
+    const iccCls = gradeCCC(row.icc?.mean);
+    html += `<tr>
+      <td class="ch-name">${row.site}</td>
+      <td>${row.n_channels}</td>
+      <td>${(row.matched_beats_total || 0).toLocaleString()}</td>
+      <td>${fmtMS(row.ssqi)}</td>
+      <td>${fmtMS(row.zsqi_mean)}</td>
+      <td class="${cccCls}">${fmtMS(row.ccc)}</td>
+      <td class="${iccCls}">${fmtMS(row.icc)}</td>
+      <td>${fmtMS(row.pearson_r)}</td>
+      <td>${fmtMSsigned(row.bias_ms, 1)}</td>
+      <td>${fmtMS(row.loa_span_ms, 0)}</td>
+      <td>${fmtMS(row.rmse_ms, 1)} / ${fmtMS(row.mae_ms, 1)}</td>
+    </tr>`;
+  });
+  return html + `</tbody>`;
+}
+
+function renderBatchHrAgreement(p) {
+  const rows = (p && p.hr_per_channel) || [];
+  $("batch-hr-summary").textContent = rows.length
+    ? `${rows.length} channels · CCC/ICC/Bland-Altman on per-session mean HR`
+    : "";
+  $("batch-hr-table").innerHTML = hrAgreementTableHTML(rows);
+}
+
+
+function renderBatchSdnnAgreement(p) {
+  const rows = (p && p.sdnn_per_channel) || [];
+  $("batch-sdnn-summary").textContent = rows.length
+    ? `${rows.length} channels · CCC/ICC/Bland-Altman on per-session SDNN`
+    : "";
+  $("batch-sdnn-table").innerHTML = sdnnAgreementTableHTML(rows);
+}
+
+
+function renderBatchLfhfAgreement(p) {
+  const rows = (p && p.lfhf_per_channel) || [];
+  $("batch-lfhf-summary").textContent = rows.length
+    ? `${rows.length} channels · CCC/ICC/Bland-Altman on per-session LF/HF (pyhrv welch_psd)`
+    : "";
+  $("batch-lfhf-table").innerHTML = lfhfAgreementTableHTML(rows);
+}
+
+
+// The four batch sections repeated once per Fitzpatrick skin-tone band
+// (light I-II, medium III-IV, dark V-VI). Built entirely from the payload's
+// stratified_by_skin array — no fixed table IDs, no sorting.
+const SKIN_LABELS = {
+  light:  "Light skin · FST I–II",
+  medium: "Medium skin · FST III–IV",
+  dark:   "Dark skin · FST V–VI",
+};
+
+function renderBatchStrata(p) {
+  const host = $("batch-strata");
+  if (!host) return;
+  const strata = (p && p.stratified_by_skin) || [];
+  if (!strata.length || strata.every(g => !g.n_sessions)) {
+    host.innerHTML = `
+      <section class="block">
+        <div class="header-row"><p class="eyebrow">Stratified by skin color</p></div>
+        <p class="muted">No session carries a Fitzpatrick grade — save FST metadata on sessions to unlock the light/medium/dark strata.</p>
+      </section>`;
+    return;
+  }
+
+  const subBlock = (title, tableHTML) => `
+    <div class="strata-sub">
+      <p class="eyebrow strata-sub-title">${title}</p>
+      <div class="sqi-wrap"><table class="sqi-table">${tableHTML}</table></div>
+    </div>`;
+
+  let html = `<div class="strata-lead"><p class="eyebrow">Stratified by skin color</p></div>`;
+  for (const g of strata) {
+    const title = SKIN_LABELS[g.group] || g.group;
+    html += `<section class="block strata-group">
+      <div class="header-row">
+        <p class="eyebrow">${title}</p>
+        <span class="right">${g.n_sessions} session${g.n_sessions === 1 ? "" : "s"}</span>
+      </div>
+      ${subBlock("Per-site aggregate", perSiteTableStaticHTML(g.per_site || []))}
+      ${subBlock("Heart rate — PPG vs ECG, across sessions", hrAgreementTableHTML(g.hr_per_channel || []))}
+      ${subBlock("HRV SDNN — PPG vs ECG, across sessions", sdnnAgreementTableHTML(g.sdnn_per_channel || []))}
+      ${subBlock("LF/HF ratio — PPG vs ECG, across sessions", lfhfAgreementTableHTML(g.lfhf_per_channel || []))}
+    </section>`;
+  }
+  host.innerHTML = html;
 }
 
 
@@ -2105,6 +2222,7 @@ async function loadBatchFromArchive(batchId) {
   renderBatchHrAgreement(payload);
   renderBatchSdnnAgreement(payload);
   renderBatchLfhfAgreement(payload);
+  renderBatchStrata(payload);
   renderBatchPerChannel(payload);
 }
 

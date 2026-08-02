@@ -98,6 +98,36 @@ class TestInferFs:
         assert np.isnan(analysis.infer_fs(ts_ms))
 
 
+# ── effective_fs ─────────────────────────────────────────────────────────────
+
+class TestEffectiveFs:
+
+    def test_uniform_matches_infer_fs(self):
+        ts_ms = np.arange(0, 1000, 5.0)   # 5 ms step => 200 Hz
+        assert analysis.effective_fs(ts_ms) == pytest.approx(200.0)
+
+    def test_bimodal_reports_true_throughput_not_median(self):
+        # 60% of gaps are 2.5 ms (400 Hz), 40% are 10 ms (100 Hz) — the same
+        # majority-fast shape the real starved-ECG recordings show. The median
+        # gap lands in the fast cluster so infer_fs reports ~400 Hz, but the
+        # actual average rate over the span is far lower. effective_fs must
+        # reflect the real throughput, not the dominant-mode cadence.
+        gaps = np.concatenate([np.full(600, 2.5), np.full(400, 10.0)])
+        ts_ms = np.concatenate([[0.0], np.cumsum(gaps)])
+        assert analysis.infer_fs(ts_ms) == pytest.approx(400.0)
+        span_s = ts_ms[-1] / 1000.0
+        expected = (len(ts_ms) - 1) / span_s
+        assert analysis.effective_fs(ts_ms) == pytest.approx(expected)
+        assert analysis.effective_fs(ts_ms) < 200.0
+
+    def test_too_few_samples_returns_nan(self):
+        assert np.isnan(analysis.effective_fs(np.array([])))
+        assert np.isnan(analysis.effective_fs(np.array([1.0])))
+
+    def test_zero_span_returns_nan(self):
+        assert np.isnan(analysis.effective_fs(np.array([5.0, 5.0, 5.0])))
+
+
 # ── _downsample preserves extremes ─────────────────────────────────────────
 
 class TestDownsample:
@@ -367,6 +397,65 @@ class TestAggregatePerSite:
         # Empty / None roll up into "unassigned".
         assert "unassigned" in sites
         assert "finger" in sites
+
+
+# ── Skin-tone stratification ────────────────────────────────────────────────
+
+class TestStratifyBySkin:
+
+    def _session(self, fst, ccc=0.9):
+        row = {
+            "_session_name": f"session_fst{fst}",
+            "site": "finger", "ssqi": 1.0,
+            "zsqi_mean": 0.04, "zsqi_std": 0.01, "n_matched_beats": 50,
+            "channel": 0, "mean_hr_bpm": 70.0, "sdnn_ms": 40.0, "lf_hf_ratio": 1.2,
+            "stats": {
+                "ccc": ccc, "icc": ccc, "pearson_r": ccc, "bias_ms": 50.0,
+                "loa_lower_ms": -100.0, "loa_upper_ms": 100.0,
+                "rmse_ms": 25.0, "mae_ms": 20.0,
+            },
+        }
+        return {
+            "participant": {"fitzpatrick": fst},
+            "ecg": {"mean_hr_bpm": 70.0, "sdnn_ms": 40.0, "lf_hf_ratio": 1.2},
+            "results": [row],
+        }
+
+    def test_group_boundaries(self):
+        assert analysis._skin_group_of(1) == "light"
+        assert analysis._skin_group_of(2) == "light"
+        assert analysis._skin_group_of(3) == "medium"
+        assert analysis._skin_group_of(4) == "medium"
+        assert analysis._skin_group_of(5) == "dark"
+        assert analysis._skin_group_of(6) == "dark"
+        assert analysis._skin_group_of(0) is None
+        assert analysis._skin_group_of(7) is None
+        assert analysis._skin_group_of(None) is None
+
+    def test_always_three_bands(self):
+        out = analysis._stratify_by_skin([])
+        assert [g["group"] for g in out] == ["light", "medium", "dark"]
+        assert all(g["n_sessions"] == 0 for g in out)
+        for g in out:
+            for k in ("per_site", "hr_per_channel", "sdnn_per_channel", "lfhf_per_channel"):
+                assert g[k] == []
+
+    def test_buckets_by_fst(self):
+        per_session = [self._session(1), self._session(2),
+                       self._session(4), self._session(6)]
+        out = {g["group"]: g for g in analysis._stratify_by_skin(per_session)}
+        assert out["light"]["n_sessions"] == 2
+        assert out["medium"]["n_sessions"] == 1
+        assert out["dark"]["n_sessions"] == 1
+        # Light band saw 2 sessions at one site → per-site aggregate present.
+        assert out["light"]["per_site"][0]["site"] == "finger"
+        assert out["light"]["per_site"][0]["n_sessions"] == 2
+
+    def test_ungraded_sessions_dropped(self):
+        per_session = [self._session(None), self._session(2)]
+        out = {g["group"]: g for g in analysis._stratify_by_skin(per_session)}
+        assert out["light"]["n_sessions"] == 1
+        assert sum(g["n_sessions"] for g in out.values()) == 1
 
 
 # ── End-to-end: analyze_session against synthetic data ──────────────────────

@@ -56,6 +56,11 @@ FRAME_SIZE = 8
 BATCH_FRAMES = 256                # 64 * 8 = 512 bytes per flush
 FLUSH_INTERVAL_MS = 55           # hard latency cap if batch doesn't fill
 
+# How often to emit the throughput status line. Rates are computed per
+# stream (ECG on its own, PPG per channel) over each interval, so the
+# printed ECG figure is the ACTUAL achieved ECG sampling rate.
+REPORT_INTERVAL_US = 2_000_000
+
 
 class Mux:
     """Thin wrapper around the TCA9548A. Caches the active channel so we
@@ -182,76 +187,82 @@ def main():
     last_ecg_us = ticks_us()
     last_flush_ms = ticks_ms()
     ppg_index = 0
-    samples_in_batch = 0
-    throughput_batch_size = 400
-    t_throughput_start = ticks_us()
+
+    # Per-stream sample counters for the throughput report. Kept separate
+    # (not one combined total) so the printed ECG figure is the ACTUAL ECG
+    # rate — the old firmware summed ECG + every PPG channel into one
+    # "Freq:" number, which read ~2100 Hz and completely hid that ECG
+    # itself had collapsed to ~185 Hz.
+    ecg_count = 0
+    ppg_count = 0
+    report_start_us = ticks_us()
+
+    def service_ecg():
+        # Emit one ECG sample iff its cadence deadline (ECG_INTERVAL_US) has
+        # passed. Called at the top of every loop iteration AND before every
+        # single PPG FIFO read, so however long a PPG drain runs, ECG is
+        # serviced between individual I2C reads — bounding ECG latency to one
+        # sample-read (~0.1 ms) instead of a whole FIFO burst. This is the
+        # fix for the old bimodal ECG spacing (alternating 2.5 ms / ~10 ms
+        # gaps) that halved the effective ECG rate. Returns True if the frame
+        # buffer filled and the caller should flush.
+        nonlocal last_ecg_us, ecg_count
+        now = ticks_us()
+        if ticks_diff(now, last_ecg_us) < ECG_INTERVAL_US:
+            return False
+        last_ecg_us = now
+        if lo_plus.value() or lo_minus.value():
+            filled = fb.add(ECG_CHANNEL, now, ECG_LEADS_OFF_SENTINEL)
+        else:
+            filled = fb.add(ECG_CHANNEL, now, ecg_adc.read_u16())
+        ecg_count += 1
+        return filled
 
     while True:
-        # 1. ECG cadence — checked first every iteration.
-        now = ticks_us()
-        full = False
-        if ticks_diff(now, last_ecg_us) >= ECG_INTERVAL_US:
-            last_ecg_us = now
-            if lo_plus.value() or lo_minus.value():
-                full = fb.add(ECG_CHANNEL, now, ECG_LEADS_OFF_SENTINEL)
-            else:
-                full = fb.add(ECG_CHANNEL, now, ecg_adc.read_u16())
-            samples_in_batch += 1
-
-        # 2. One sensor per iteration, round-robin — drain its WHOLE FIFO
-        #    each visit. The ECG cadence is re-checked between every
-        #    emitted PPG sample so a long drain (5-10 sequential I2C
-        #    reads inside check()) can't run past the 2500 µs ECG
-        #    interval and starve ECG down toward 120 Hz. Without this
-        #    inner cadence check, ECG only gets one fire per outer-loop
-        #    iteration, which collapses as the drain grows.
-        if sensors and not full:
-            ch, sensor = sensors[ppg_index]
-            mux.select(ch)
-            sensor.check()
-            n = sensor.available()
-            if n:
-                # Back-date older samples by PPG_SAMPLE_PERIOD_US so the
-                # downstream median-dt fs inference doesn't see a burst
-                # of identical timestamps.
-                now = ticks_us()
-                base = now - (n - 1) * PPG_SAMPLE_PERIOD_US
-                for i in range(n):
-                    # Mid-drain ECG cadence check.
-                    now_ecg = ticks_us()
-                    if ticks_diff(now_ecg, last_ecg_us) >= ECG_INTERVAL_US:
-                        last_ecg_us = now_ecg
-                        if lo_plus.value() or lo_minus.value():
-                            if fb.add(ECG_CHANNEL, now_ecg, ECG_LEADS_OFF_SENTINEL):
-                                fb.flush()
-                                last_flush_ms = ticks_ms()
-                        else:
-                            if fb.add(ECG_CHANNEL, now_ecg, ecg_adc.read_u16()):
-                                fb.flush()
-                                last_flush_ms = ticks_ms()
-                        samples_in_batch += 1
-
-                    sample = sensor.pop_red_from_storage()
-                    if fb.add(ch, base + i * PPG_SAMPLE_PERIOD_US, sample):
-                        fb.flush()
-                        last_flush_ms = ticks_ms()
-                samples_in_batch += n
-            ppg_index = (ppg_index + 1) % len(sensors)
-
-        # 3. Flush on either trigger: buffer full, or latency cap hit.
-        if full or ticks_diff(ticks_ms(), last_flush_ms) >= FLUSH_INTERVAL_MS:
+        # 1. ECG first, every iteration.
+        if service_ecg():
             fb.flush()
             last_flush_ms = ticks_ms()
 
-        # 4. Periodic throughput print — queued, emitted at next flush
-        # so it can't tear a binary frame.
-        if samples_in_batch >= throughput_batch_size:
-            duration_us = ticks_diff(ticks_us(), t_throughput_start)
-            if duration_us > 0:
-                freq = (samples_in_batch * 1_000_000) / duration_us
-                fb.queue_status(f"Freq:{freq:.1f}Hz")
-            samples_in_batch = 0
-            t_throughput_start = ticks_us()
+        # 2. Service one PPG sensor, round-robin. Drain its FIFO one sample
+        #    at a time, re-checking ECG (service_ecg) before every read so
+        #    the I2C burst can't starve ECG. Back-date the drained samples by
+        #    PPG_SAMPLE_PERIOD_US so the downstream median-dt fs inference
+        #    doesn't see a burst of near-identical timestamps.
+        if sensors:
+            ch, sensor = sensors[ppg_index]
+            mux.select(ch)
+            n = sensor.fifo_available()
+            if n:
+                now = ticks_us()
+                base = now - (n - 1) * PPG_SAMPLE_PERIOD_US
+                for i in range(n):
+                    if service_ecg():
+                        fb.flush()
+                        last_flush_ms = ticks_ms()
+                    sample = sensor.read_fifo_sample()
+                    if fb.add(ch, base + i * PPG_SAMPLE_PERIOD_US, sample):
+                        fb.flush()
+                        last_flush_ms = ticks_ms()
+                ppg_count += n
+            ppg_index = (ppg_index + 1) % len(sensors)
+
+        # 3. Latency-cap flush (buffer-full flushes happen inline above).
+        if ticks_diff(ticks_ms(), last_flush_ms) >= FLUSH_INTERVAL_MS:
+            fb.flush()
+            last_flush_ms = ticks_ms()
+
+        # 4. Per-stream throughput report — queued, emitted at next flush so
+        #    it can't tear a binary frame. Prints the true ECG rate plus the
+        #    per-channel PPG rate.
+        elapsed = ticks_diff(ticks_us(), report_start_us)
+        if elapsed >= REPORT_INTERVAL_US:
+            ecg_hz = ecg_count * 1_000_000 / elapsed
+            ppg_hz = (ppg_count * 1_000_000 / elapsed / len(sensors)) if sensors else 0.0
+            fb.queue_status(f"ECG:{ecg_hz:.1f}Hz PPG:{ppg_hz:.1f}Hz/ch")
+            ecg_count = 0
+            ppg_count = 0
+            report_start_us = ticks_us()
 
 
 if __name__ == "__main__":

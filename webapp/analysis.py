@@ -143,10 +143,34 @@ def ppg_bandpass(sig, fs, lowcut=0.5, highcut=8.0, order=2):
 
 
 def infer_fs(ts_ms):
+    """Instantaneous cadence: 1 / median(inter-sample interval).
+
+    This is the *typical* spacing between consecutive good samples, so it
+    is robust to a handful of oversized gaps. It is the right rate for the
+    signal-processing grid (``_resample_uniform``) and for Butterworth
+    filter design, which want the local sampling period rather than the
+    long-run average. It is NOT the true throughput — see ``effective_fs``.
+    """
     if len(ts_ms) < 2:
         return float("nan")
     dt = float(np.median(np.diff(ts_ms)))
     return 1000.0 / dt if dt > 0 else float("nan")
+
+
+def effective_fs(ts_ms):
+    """Actual average sampling rate: samples over the wall-clock span they
+    cover, i.e. (N - 1) / (t_last - t_first). This is what the dashboard
+    reports.
+
+    Unlike ``infer_fs`` (median inter-sample rate), this counts every gap,
+    stall, and dropped burst against the rate, so a channel that briefly
+    hits 400 Hz but is starved for ~40% of the recording reports its true
+    ~185 Hz throughput rather than the 375 Hz the median would show.
+    """
+    if len(ts_ms) < 2:
+        return float("nan")
+    span_ms = float(ts_ms[-1] - ts_ms[0])
+    return (len(ts_ms) - 1) * 1000.0 / span_ms if span_ms > 0 else float("nan")
 
 
 # ── Hybrid PPG conditioning + peak detection ─────────────────────────────────
@@ -160,6 +184,35 @@ def infer_fs(ts_ms):
 # interval timing off the *recorded* timestamps rather than the resample
 # grid. SSQI is deliberately NOT computed on the bandpassed signal — the
 # band-pass distorts the pulse shape and skew.
+
+def _fix_timestamp_spikes(ts_ms, sig, jump_factor=50.0):
+    """Repair samples whose timestamp jumps implausibly far (in either
+    direction) from the recording's own sample spacing, e.g. a firmware
+    tick-counter glitch/32-bit rollover, by resetting that one step to the
+    median inter-sample interval instead of trusting the raw delta.
+
+    Left uncorrected, a single such jump inflates any duration computed as
+    ts[-1]-ts[0] (see analyze_channel's mean_hr_bpm) and, downstream, makes
+    _drop_non_monotonic discard every real sample that follows once the
+    corrupted value becomes the new running max. ``jump_factor`` is kept
+    large so ordinary back-dated bursts (handled separately below) are left
+    alone — only jumps far outside anything plausible get reset.
+    """
+    if len(ts_ms) < 3:
+        return ts_ms, sig
+    deltas = np.diff(ts_ms).astype(float)
+    median_dt = np.median(deltas)
+    if median_dt <= 0:
+        return ts_ms, sig
+    bad = np.abs(deltas - median_dt) > jump_factor * median_dt
+    if not bad.any():
+        return ts_ms, sig
+    deltas[bad] = median_dt
+    fixed = np.empty(len(ts_ms), dtype=float)
+    fixed[0] = ts_ms[0]
+    fixed[1:] = ts_ms[0] + np.cumsum(deltas)
+    return fixed, sig
+
 
 def _drop_non_monotonic(ts_ms, sig):
     """Drop samples whose timestamp doesn't strictly exceed the running max.
@@ -698,7 +751,7 @@ def load_session_signals(name, max_points=5000, tail_seconds=None,
                 "time_s": xs.tolist(),
                 "signal": ys.tolist(),
                 "leads_off_spans": spans,
-                "fs_hz": infer_fs(ts_ms),
+                "fs_hz": effective_fs(ts_ms),
                 "n_samples": int(len(sig)),
             }
 
@@ -715,13 +768,16 @@ def load_session_signals(name, max_points=5000, tail_seconds=None,
             continue
         n_recorded = int(len(sig))
         # Condition exactly like analyze_channel so the displayed trace IS the
-        # signal the peaks were detected on: drop backward-stepping timestamps
-        # -> cubic resample onto a uniform grid -> rolling-median outlier
-        # scrub. The peak markers (timed in grid seconds by analyze_channel)
-        # then sit on this interpolated trace instead of having their Y pulled
-        # from the raw samples.
+        # signal the peaks were detected on: reset implausible timestamp
+        # spikes -> drop backward-stepping timestamps -> cubic resample onto
+        # a uniform grid -> rolling-median outlier scrub. The peak markers
+        # (timed in grid seconds by analyze_channel) then sit on this
+        # interpolated trace instead of having their Y pulled from the raw
+        # samples.
+        ts_ms, sig = _fix_timestamp_spikes(ts_ms, sig)
         ts_ms, sig = _drop_non_monotonic(ts_ms, sig)
-        fs = infer_fs(ts_ms)
+        fs = infer_fs(ts_ms)          # grid + filter cadence
+        disp_fs = effective_fs(ts_ms)  # actual throughput shown in the UI
         grid_ts_ms, grid_sig = _resample_uniform(ts_ms, sig, fs)
         clean_sig = _remove_outliers(grid_sig)
         ts_s = (grid_ts_ms - t0_ms) / 1000.0
@@ -741,7 +797,7 @@ def load_session_signals(name, max_points=5000, tail_seconds=None,
             "signal": ys.tolist(),
             "time_bp_s": bp_x,
             "signal_bp": bp_y,
-            "fs_hz": fs,
+            "fs_hz": disp_fs,
             "n_samples": n_recorded,
         })
 
@@ -784,7 +840,7 @@ def ecg_detail(name, start_s=None, end_s=None):
         "name": name,
         "time_s": ts_s.tolist(),
         "signal": sig.tolist(),
-        "fs_hz": fs,
+        "fs_hz": effective_fs(ts_ms),
         "n_samples": int(len(sig)),
         "duration_s": dur,
         "n_peaks": int(len(peaks)),
@@ -892,11 +948,13 @@ def analyze_channel(ppg_ts_ms, ppg_sig, ecg_ts_ms, ecg_sig, t0_ms=0.0,
     end can overlay markers on the downsampled Plotly signal traces
     without doing its own unit conversion.
     """
-    # Hybrid conditioning: drop backward-stepping timestamps, resample onto
-    # a uniform grid at the measured fs (so the Butterworth filters run on
-    # evenly-sampled data), then scrub motion spikes. clean_sig is the
-    # resampled, outlier-removed, *pre-bandpass* trace — SSQI/ZSQI run on
-    # it; the bandpass happens inside the peak detector only.
+    # Hybrid conditioning: reset implausible timestamp spikes, drop
+    # backward-stepping timestamps, resample onto a uniform grid at the
+    # measured fs (so the Butterworth filters run on evenly-sampled data),
+    # then scrub motion spikes. clean_sig is the resampled, outlier-removed,
+    # *pre-bandpass* trace — SSQI/ZSQI run on it; the bandpass happens
+    # inside the peak detector only.
+    ppg_ts_ms, ppg_sig = _fix_timestamp_spikes(ppg_ts_ms, ppg_sig)
     ppg_ts_ms, ppg_sig = _drop_non_monotonic(ppg_ts_ms, ppg_sig)
     ppg_fs = infer_fs(ppg_ts_ms)
     ecg_fs = infer_fs(ecg_ts_ms)
@@ -905,8 +963,8 @@ def analyze_channel(ppg_ts_ms, ppg_sig, ecg_ts_ms, ecg_sig, t0_ms=0.0,
     clean_sig = _remove_outliers(grid_sig)
 
     result = {
-        "ppg_fs_hz": ppg_fs,
-        "ecg_fs_hz": ecg_fs,
+        "ppg_fs_hz": effective_fs(ppg_ts_ms),
+        "ecg_fs_hz": effective_fs(ecg_ts_ms),
         "n_ppg_samples": int(len(ppg_sig)),
         "n_ecg_samples": int(len(ecg_sig)),
         "ssqi": _safe_ssqi(clean_sig),
@@ -1080,7 +1138,7 @@ def analyze_session(name, start_s=None, end_s=None):
     ecg_fd = _freq_domain_metrics(ecg_nn_ms)
 
     ecg_info = {
-        "fs_hz": ecg_fs,
+        "fs_hz": effective_fs(ecg_ts_ms),
         "n_samples": int(len(ecg_sig)),
         "duration_s": duration_s,
         "n_peaks": int(len(ecg_peaks)),
@@ -1372,6 +1430,57 @@ def _hr_agreement_per_channel(per_session):
     return rows
 
 
+# Fitzpatrick skin-tone bands used to stratify the batch. Light = I-II,
+# medium = III-IV, dark = V-VI (2 grades each, unlike sleepiness.py's
+# I-III / IV-VI split — this is the manuscript's three-band scheme).
+_SKIN_GROUPS = [
+    ("light",  "I-II",   (1, 2)),
+    ("medium", "III-IV", (3, 4)),
+    ("dark",   "V-VI",   (5, 6)),
+]
+
+
+def _skin_group_of(fst):
+    """Map a Fitzpatrick grade (1-6) to a skin-tone band name, or None if
+    ungraded / out of range."""
+    if fst is None:
+        return None
+    try:
+        f = int(fst)
+    except (TypeError, ValueError):
+        return None
+    for name, _, (lo, hi) in _SKIN_GROUPS:
+        if lo <= f <= hi:
+            return name
+    return None
+
+
+def _stratify_by_skin(per_session):
+    """Re-run the four batch aggregations (per-site, HR, SDNN, LF/HF) within
+    each Fitzpatrick skin-tone band. Sessions with no FST grade are dropped
+    from every stratum. Always returns all three bands (empty tables when a
+    band has no graded sessions) so the frontend renders a stable layout."""
+    buckets = {name: [] for name, _, _ in _SKIN_GROUPS}
+    for s in per_session:
+        group = _skin_group_of((s.get("participant") or {}).get("fitzpatrick"))
+        if group is not None:
+            buckets[group].append(s)
+
+    out = []
+    for name, fst_range, _ in _SKIN_GROUPS:
+        subset = buckets[name]
+        out.append({
+            "group":            name,
+            "fst_range":        fst_range,
+            "n_sessions":       len(subset),
+            "per_site":         _aggregate_per_site(subset),
+            "hr_per_channel":   _hr_agreement_per_channel(subset),
+            "sdnn_per_channel": _sdnn_agreement_per_channel(subset),
+            "lfhf_per_channel": _lfhf_agreement_per_channel(subset),
+        })
+    return out
+
+
 def analyze_all_sessions(start_s=None, end_s=None, use_saved_windows=False):
     """Run analyze_session on every session_*/ folder under MDPIdata/.
 
@@ -1439,6 +1548,7 @@ def analyze_all_sessions(start_s=None, end_s=None, use_saved_windows=False):
         "hr_per_channel":       hr_per_channel,
         "sdnn_per_channel":     sdnn_per_channel,
         "lfhf_per_channel":     lfhf_per_channel,
+        "stratified_by_skin":   _stratify_by_skin(per_session),
         "fst_unavailable":      not any_fst,
         "use_saved_windows":    use_saved_windows,
         "crop_window": ({"per_session": True} if use_saved_windows
