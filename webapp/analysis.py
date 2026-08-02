@@ -1243,16 +1243,19 @@ def _mean_std(values):
     }
 
 
-# Body sites in mux-lane order (ch0 → ch4: finger, earlobe, shoulder,
-# forehead, wrist) rather than alphabetical. Alphabetical put earlobe first,
-# which read as arbitrary and did not line up with the per-channel tables
-# above it — those are ordered by channel, so both now agree finger-first.
-# A site outside the default map (a hand-edited label) sorts alphabetically
-# after the known ones instead of being dropped.
-_SITE_ORDER = list(dict.fromkeys(
-    sessions.DEFAULT_CHANNEL_SITES[k]
-    for k in sorted(sessions.DEFAULT_CHANNEL_SITES, key=int)
-))
+# Reporting order for body sites, used by every site-ordered table in the
+# batch view. This is a *presentation* order chosen for the manuscript — it is
+# deliberately neither alphabetical (which led with earlobe) nor mux-lane order
+# (ch0 → ch4 = finger, earlobe, shoulder, forehead, wrist), so it does not
+# track DEFAULT_CHANNEL_SITES and must be edited here when the paper's table
+# order changes.
+#
+# "temple" is listed adjacent to "forehead" because they name the same
+# head-mounted sensor position; every session on this rig currently labels
+# that channel "forehead", so the slot resolves to forehead in practice.
+# A site outside this list (a hand-edited label) sorts alphabetically after
+# the known ones instead of being dropped.
+_SITE_ORDER = ["finger", "wrist", "earlobe", "forehead", "temple", "shoulder"]
 
 
 def _site_sort_key(site):
@@ -1335,7 +1338,10 @@ def _lfhf_agreement_per_channel(per_session):
             slot["ppg"].append(float(p_val))
 
     rows = []
-    for ch in sorted(by_ch.keys()):
+    # Rows follow the manuscript's site reporting order (_SITE_ORDER), not
+    # channel number, so this table reads in the same order as the per-site
+    # table above it. Channel is still the row's identity, just not its sort key.
+    for ch in sorted(by_ch, key=lambda c: (_site_sort_key(by_ch[c]["site"]), c)):
         e = np.asarray(by_ch[ch]["ecg"], dtype=float)
         p = np.asarray(by_ch[ch]["ppg"], dtype=float)
         n = len(e)
@@ -1396,7 +1402,10 @@ def _sdnn_agreement_per_channel(per_session):
             slot["ppg"].append(float(sdnn_p))
 
     rows = []
-    for ch in sorted(by_ch.keys()):
+    # Rows follow the manuscript's site reporting order (_SITE_ORDER), not
+    # channel number, so this table reads in the same order as the per-site
+    # table above it. Channel is still the row's identity, just not its sort key.
+    for ch in sorted(by_ch, key=lambda c: (_site_sort_key(by_ch[c]["site"]), c)):
         e = np.asarray(by_ch[ch]["ecg"], dtype=float)
         p = np.asarray(by_ch[ch]["ppg"], dtype=float)
         n = len(e)
@@ -1463,7 +1472,10 @@ def _hr_agreement_per_channel(per_session):
             slot["ppg"].append(float(hr_p))
 
     rows = []
-    for ch in sorted(by_ch.keys()):
+    # Rows follow the manuscript's site reporting order (_SITE_ORDER), not
+    # channel number, so this table reads in the same order as the per-site
+    # table above it. Channel is still the row's identity, just not its sort key.
+    for ch in sorted(by_ch, key=lambda c: (_site_sort_key(by_ch[c]["site"]), c)):
         e = np.asarray(by_ch[ch]["ecg"], dtype=float)
         p = np.asarray(by_ch[ch]["ppg"], dtype=float)
         n = len(e)

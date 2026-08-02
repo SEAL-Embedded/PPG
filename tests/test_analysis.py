@@ -355,14 +355,23 @@ class TestAggregatePerSite:
         sites = sorted(s["site"] for s in out)
         assert sites == ["finger", "forehead"]
 
-    def test_rows_follow_mux_lane_order_not_alphabetical(self):
-        """Rows read finger-first (ch0 → ch4), matching the per-channel
-        tables. Alphabetical would lead with earlobe."""
+    def test_rows_follow_manuscript_site_order(self):
+        """Rows follow the manuscript reporting order in
+        analysis._SITE_ORDER, not alphabetical (which led with earlobe) and
+        not mux-lane order (ch0 → ch4)."""
         per_session = [{"results": [self._row(s) for s in
                         ("wrist", "earlobe", "forehead", "finger", "shoulder")]}]
         out = analysis._aggregate_per_site(per_session)
         assert [r["site"] for r in out] == [
-            "finger", "earlobe", "shoulder", "forehead", "wrist"]
+            "finger", "wrist", "earlobe", "forehead", "shoulder"]
+
+    def test_temple_occupies_the_forehead_slot(self):
+        """'temple' and 'forehead' name the same head-mounted position, so a
+        session using either label sorts into the same place."""
+        per_session = [{"results": [self._row(s) for s in
+                        ("shoulder", "temple", "finger")]}]
+        out = analysis._aggregate_per_site(per_session)
+        assert [r["site"] for r in out] == ["finger", "temple", "shoulder"]
 
     def test_unknown_sites_sort_after_known_ones(self):
         """A hand-edited site label must still appear — alphabetically,

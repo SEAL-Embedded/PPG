@@ -1422,6 +1422,20 @@ function renderBatchMeta(p) {
   `;
 }
 
+// Manuscript site reporting order, mirroring analysis._SITE_ORDER in
+// webapp/analysis.py — keep the two in step. Backend-built tables already
+// arrive in this order; this is for rows the frontend orders itself.
+// Unknown labels sort alphabetically after the known ones.
+const SITE_ORDER = ["finger", "wrist", "earlobe", "forehead", "temple", "shoulder"];
+function siteSortKey(site) {
+  const i = SITE_ORDER.indexOf(site);
+  return i === -1 ? [1, 0, String(site ?? "")] : [0, i, ""];
+}
+function bySiteOrder(a, b) {
+  const ka = siteSortKey(a.site), kb = siteSortKey(b.site);
+  return ka[0] - kb[0] || ka[1] - kb[1] || ka[2].localeCompare(kb[2]);
+}
+
 // Per-site aggregate table. Headers are sortable: clicking toggles
 // ascending → descending → unsorted (back to backend order). The
 // mean-of-{mean,std} cells extract `.mean` for the comparator.
@@ -1875,7 +1889,10 @@ function renderBatchPerChannel(p) {
       </td>
     </tr>`;
 
-    (sx.results || []).forEach(row => {
+    // Display order only — the payload keeps its channel order; this just
+    // makes each session's block read in the same site order as the
+    // cohort tables above.
+    (sx.results || []).slice().sort(bySiteOrder).forEach(row => {
       const s = row.stats;
       const cccCls = s ? gradeCCC(s.ccc) : "";
       const iccCls = s ? gradeCCC(s.icc) : "";
