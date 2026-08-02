@@ -98,6 +98,36 @@ class TestInferFs:
         assert np.isnan(analysis.infer_fs(ts_ms))
 
 
+# ── effective_fs ─────────────────────────────────────────────────────────────
+
+class TestEffectiveFs:
+
+    def test_uniform_matches_infer_fs(self):
+        ts_ms = np.arange(0, 1000, 5.0)   # 5 ms step => 200 Hz
+        assert analysis.effective_fs(ts_ms) == pytest.approx(200.0)
+
+    def test_bimodal_reports_true_throughput_not_median(self):
+        # 60% of gaps are 2.5 ms (400 Hz), 40% are 10 ms (100 Hz) — the same
+        # majority-fast shape the real starved-ECG recordings show. The median
+        # gap lands in the fast cluster so infer_fs reports ~400 Hz, but the
+        # actual average rate over the span is far lower. effective_fs must
+        # reflect the real throughput, not the dominant-mode cadence.
+        gaps = np.concatenate([np.full(600, 2.5), np.full(400, 10.0)])
+        ts_ms = np.concatenate([[0.0], np.cumsum(gaps)])
+        assert analysis.infer_fs(ts_ms) == pytest.approx(400.0)
+        span_s = ts_ms[-1] / 1000.0
+        expected = (len(ts_ms) - 1) / span_s
+        assert analysis.effective_fs(ts_ms) == pytest.approx(expected)
+        assert analysis.effective_fs(ts_ms) < 200.0
+
+    def test_too_few_samples_returns_nan(self):
+        assert np.isnan(analysis.effective_fs(np.array([])))
+        assert np.isnan(analysis.effective_fs(np.array([1.0])))
+
+    def test_zero_span_returns_nan(self):
+        assert np.isnan(analysis.effective_fs(np.array([5.0, 5.0, 5.0])))
+
+
 # ── _downsample preserves extremes ─────────────────────────────────────────
 
 class TestDownsample:
@@ -325,6 +355,23 @@ class TestAggregatePerSite:
         sites = sorted(s["site"] for s in out)
         assert sites == ["finger", "forehead"]
 
+    def test_rows_follow_mux_lane_order_not_alphabetical(self):
+        """Rows read finger-first (ch0 → ch4), matching the per-channel
+        tables. Alphabetical would lead with earlobe."""
+        per_session = [{"results": [self._row(s) for s in
+                        ("wrist", "earlobe", "forehead", "finger", "shoulder")]}]
+        out = analysis._aggregate_per_site(per_session)
+        assert [r["site"] for r in out] == [
+            "finger", "earlobe", "shoulder", "forehead", "wrist"]
+
+    def test_unknown_sites_sort_after_known_ones(self):
+        """A hand-edited site label must still appear — alphabetically,
+        after every site in the default mux map."""
+        per_session = [{"results": [self._row(s) for s in
+                        ("zebra", "finger", "abacus", "wrist")]}]
+        out = analysis._aggregate_per_site(per_session)
+        assert [r["site"] for r in out] == ["finger", "wrist", "abacus", "zebra"]
+
     def test_mean_std_correctness(self):
         per_session = [{"results": [
             self._row("finger", ccc=0.9),
@@ -369,6 +416,102 @@ class TestAggregatePerSite:
         assert "finger" in sites
 
 
+# ── Frequency-domain HRV (Welch PSD) ────────────────────────────────────────
+
+class TestFreqDomainMetrics:
+    """_freq_domain_metrics replaced a pyhrv call with scipy.signal.welch.
+    A sinusoid of amplitude A carries variance A²/2, and integrating the PSD
+    over its band recovers exactly that — so a synthetic NN series with known
+    LF and HF components pins the absolute calibration, not just the shape."""
+
+    def _nn(self, lf_amp=30.0, hf_amp=15.0, n=400, mean_ms=800.0):
+        # Beat times advance by ~mean_ms, so modulate in beat-time seconds.
+        t_s = np.cumsum(np.full(n, mean_ms / 1000.0))
+        return (mean_ms
+                + lf_amp * np.sin(2 * np.pi * 0.10 * t_s)     # inside LF
+                + hf_amp * np.sin(2 * np.pi * 0.25 * t_s))    # inside HF
+
+    def test_band_powers_match_sinusoid_variance(self):
+        out = analysis._freq_domain_metrics(self._nn())
+        # A²/2: 30 -> 450 ms², 15 -> 112.5 ms². 10% tolerance covers
+        # windowing leakage and the linear detrend.
+        assert out["lf_power_ms2"] == pytest.approx(450.0, rel=0.1)
+        assert out["hf_power_ms2"] == pytest.approx(112.5, rel=0.1)
+        assert out["lf_hf_ratio"] == pytest.approx(4.0, rel=0.15)
+
+    def test_ratio_tracks_lf_hf_balance(self):
+        hf_heavy = analysis._freq_domain_metrics(self._nn(lf_amp=10.0, hf_amp=40.0))
+        assert hf_heavy["lf_hf_ratio"] < 1.0
+
+    def test_short_series_returns_nan_not_raise(self):
+        out = analysis._freq_domain_metrics(np.full(10, 800.0))
+        assert all(np.isnan(v) for v in out.values())
+
+    def test_constant_nn_has_no_band_power(self):
+        # A perfectly regular heartbeat has no variability to distribute.
+        out = analysis._freq_domain_metrics(np.full(400, 800.0))
+        assert out["lf_power_ms2"] == pytest.approx(0.0, abs=1e-6)
+
+
+# ── Skin-tone stratification ────────────────────────────────────────────────
+
+class TestStratifyBySkin:
+
+    def _session(self, fst, ccc=0.9):
+        row = {
+            "_session_name": f"session_fst{fst}",
+            "site": "finger", "ssqi": 1.0, "ksqi": 2.1,
+            "zsqi_mean": 0.04, "zsqi_std": 0.01, "n_matched_beats": 50,
+            "channel": 0, "mean_hr_bpm": 70.0, "sdnn_ms": 40.0, "lf_hf_ratio": 1.2,
+            "stats": {
+                "ccc": ccc, "icc": ccc, "pearson_r": ccc, "bias_ms": 50.0,
+                "loa_lower_ms": -100.0, "loa_upper_ms": 100.0,
+                "rmse_ms": 25.0, "mae_ms": 20.0,
+            },
+        }
+        return {
+            "participant": {"fitzpatrick": fst},
+            "ecg": {"mean_hr_bpm": 70.0, "sdnn_ms": 40.0, "lf_hf_ratio": 1.2},
+            "results": [row],
+        }
+
+    def test_group_boundaries(self):
+        assert analysis._skin_group_of(1) == "light"
+        assert analysis._skin_group_of(2) == "light"
+        assert analysis._skin_group_of(3) == "medium"
+        assert analysis._skin_group_of(4) == "medium"
+        assert analysis._skin_group_of(5) == "dark"
+        assert analysis._skin_group_of(6) == "dark"
+        assert analysis._skin_group_of(0) is None
+        assert analysis._skin_group_of(7) is None
+        assert analysis._skin_group_of(None) is None
+
+    def test_always_three_bands(self):
+        out = analysis._stratify_by_skin([])
+        assert [g["group"] for g in out] == ["light", "medium", "dark"]
+        assert all(g["n_sessions"] == 0 for g in out)
+        for g in out:
+            for k in ("per_site", "hr_per_channel", "sdnn_per_channel", "lfhf_per_channel"):
+                assert g[k] == []
+
+    def test_buckets_by_fst(self):
+        per_session = [self._session(1), self._session(2),
+                       self._session(4), self._session(6)]
+        out = {g["group"]: g for g in analysis._stratify_by_skin(per_session)}
+        assert out["light"]["n_sessions"] == 2
+        assert out["medium"]["n_sessions"] == 1
+        assert out["dark"]["n_sessions"] == 1
+        # Light band saw 2 sessions at one site → per-site aggregate present.
+        assert out["light"]["per_site"][0]["site"] == "finger"
+        assert out["light"]["per_site"][0]["n_sessions"] == 2
+
+    def test_ungraded_sessions_dropped(self):
+        per_session = [self._session(None), self._session(2)]
+        out = {g["group"]: g for g in analysis._stratify_by_skin(per_session)}
+        assert out["light"]["n_sessions"] == 1
+        assert sum(g["n_sessions"] for g in out.values()) == 1
+
+
 # ── End-to-end: analyze_session against synthetic data ──────────────────────
 
 class TestAnalyzeSessionEndToEnd:
@@ -382,7 +525,7 @@ class TestAnalyzeSessionEndToEnd:
         assert "participant" in out
         assert len(out["results"]) == 3   # synth has 3 channels
         for row in out["results"]:
-            for k in ("channel", "site", "ssqi", "zsqi_mean",
+            for k in ("channel", "site", "ssqi", "ksqi", "zsqi_mean",
                       "n_matched_beats", "interpretation"):
                 assert k in row
         # ECG block:

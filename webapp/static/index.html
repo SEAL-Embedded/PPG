@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>SEAL · PPG — Acquisition &amp; Analysis</title>
-<link rel="stylesheet" href="/static/style.css?v=20260626a">
+<link rel="stylesheet" href="/static/style.css?v=20260802a">
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
 <body>
@@ -84,7 +84,7 @@
     <div class="form-group session-search">
       <input id="session-filter" placeholder="Filter by ID or date…">
     </div>
-    <button id="btn-analyze-all" class="primary mini" title="Run SSQI / ZSQI / CCC / ICC across every session in MDPIdata/ and aggregate by body site">▦ Analyze all sessions</button>
+    <button id="btn-analyze-all" class="primary mini" title="Run SSQI / ZSQI / KSQI / CCC / ICC across every session in MDPIdata/ and aggregate by body site">▦ Analyze all sessions</button>
     <label class="batch-window-toggle" title="When on, each session is cropped to its own saved best window instead of one shared window. Sessions with no saved window use their full length.">
       <input type="checkbox" id="use-saved-windows"> Use each session's best window
     </label>
@@ -113,7 +113,7 @@
         <div class="action-row">
           <button id="btn-batch-rerun">Re-run</button>
           <button id="btn-batch-close" class="ghost">Close batch view</button>
-          <button id="btn-batch-export" class="ghost" title="Download the per-site aggregate as CSV">⤓ Export CSV</button>
+          <button id="btn-batch-export" class="ghost" title="Download every table in this batch view as CSV — one titled block per table, blank-line separated, ready to paste into Word">⤓ Export CSV</button>
           <div class="spacer"></div>
           <span class="muted mono" id="batch-status"></span>
         </div>
@@ -157,6 +157,9 @@
         </div>
         <div class="sqi-wrap"><table class="sqi-table" id="batch-lfhf-table"></table></div>
       </section>
+
+      <!-- The four sections above, repeated per Fitzpatrick skin-tone band -->
+      <div id="batch-strata"></div>
 
       <section class="block" id="batch-per-channel-block">
         <div class="header-row">
@@ -347,6 +350,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260601b"></script>
+<script src="/static/app.js?v=20260802d"></script>
 </body>
 </html>

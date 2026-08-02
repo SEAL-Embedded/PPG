@@ -524,6 +524,19 @@ section.block .header-row .right {
   color: var(--ink-faint);
 }
 
+/* Skin-tone stratified batch sections: each group is a bordered block
+   holding the four sub-tables (per-site, HR, SDNN, LF/HF). */
+.strata-lead { margin-top: 30px; }
+section.block.strata-group {
+  border: 1px solid var(--hair-soft);
+  border-radius: 3px;
+  padding: 16px 18px;
+  background: var(--panel);
+}
+.strata-sub { margin-top: 18px; }
+.strata-sub:first-of-type { margin-top: 6px; }
+.strata-sub-title { margin-bottom: 8px; }
+
 /* plots */
 .plot {
   width: 100%; min-height: 380px;

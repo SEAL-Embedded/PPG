@@ -25,6 +25,14 @@ demo/
 # Per-machine Claude Code permissions — local paths, never share
 .claude/settings.local.json
 
+# Remotion video project — deps, render output, and the generated data dump
+video/node_modules/
+video/out/
+video/public/session.json
+
+# Local venv
+.venv/
+
 # Editor / OS
 .vscode/
 .idea/

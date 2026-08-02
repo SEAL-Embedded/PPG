@@ -81,8 +81,9 @@ Order of operations on each PPG channel:
    motion-spike removal.
 
 The result, `clean_sig`, is the **resampled, outlier-removed, pre-bandpass**
-trace. SSQI and ZSQI are computed on `clean_sig`. The bandpass is applied only
-inside the peak detector (SSQI on a bandpassed signal would distort skew).
+trace. SSQI, ZSQI and KSQI are computed on `clean_sig`. The bandpass is applied
+only inside the peak detector (SSQI/KSQI on a bandpassed signal would distort
+the skew and the tail weight the two moments measure).
 
 ---
 
@@ -111,7 +112,16 @@ recordings are high-SNR and very distinct, so detection is `scipy.signal.find_pe
 with three scale/rate-relative guards:
 - **Polarity**: orient the trace so R-peaks point up, decided from the robust
   1st/99th percentiles (not raw min/max, so one artifact spike can't flip the
-  whole recording). Handles an inverted lead.
+  whole recording). Handles an inverted lead. The flip only fires when the
+  margin is decisive -- `_R_ORIENTATION_MIN_RATIO = 1.2` between the larger and
+  smaller percentile distance. Below that, R and S amplitudes are effectively
+  tied, so the code defaults to upright and emits a `UserWarning` naming the
+  ratio. Rationale: a wrong flip does not fail loudly, it silently relocates
+  every peak onto the S-wave. Real case in this dataset:
+  `session_20260715_153323` decided polarity on a **1.0%** margin (dist_low
+  12131 vs dist_high 12011) and was being detected upside-down; the guard
+  corrects it, cutting that session's raw RR standard deviation from 61.4 ms to
+  54.1 ms. It is the only one of the 20 sessions whose orientation changes.
 - **Relative prominence**: `prominence = 0.35 * (p99 - p40)` of the oriented
   signal — 35% of the recording's own R-amplitude. Prominence measures rise
   above the surrounding troughs, so it is immune to baseline wander and DC
@@ -208,9 +218,15 @@ lines ~849-863.)
   Matches Task Force 1996 definition. (`analyze_channel` ~862, `analyze_session` ~951-959.)
 
 ### Frequency-domain: `analysis._freq_domain_metrics`
-- `pyhrv.frequency_domain.welch_psd` on the cleaned NN series (ms), min 50 beats.
-- pyhrv internally cubic-spline resamples NN to 4 Hz, runs Welch PSD, integrates
-  over Task Force 1996 bands: VLF 0-0.04, LF 0.04-0.15, HF 0.15-0.40 Hz.
+- `scipy.signal.welch` on the cleaned NN series (ms), min 50 beats.
+- Cubic-spline resamples NN onto a uniform 4 Hz grid, linear-detrends, runs
+  Welch PSD (Hamming, `nperseg=300` = 75 s, `nfft>=4096`), integrates over
+  Task Force 1996 bands: VLF 0.003-0.04, LF 0.04-0.15, HF 0.15-0.40 Hz.
+- Previously called `pyhrv.frequency_domain.welch_psd` behind a try/except.
+  pyhrv pulls in `spectrum` (C/Fortran toolchain), is unmaintained and predates
+  numpy 2, so it was not installed -- every LF/HF value silently came back NaN
+  and the LF/HF batch table rendered empty. scipy is a hard dependency and runs
+  the identical method, so the metric now always computes.
 - Outputs: `vlf_power_ms2`, `lf_power_ms2`, `hf_power_ms2`, `lf_hf_ratio`.
 - NN passed in **ms** (the code explicitly notes that passing seconds, as the
   legacy `old/PPGanalysis.py` does, scales band powers by 1e-6).
@@ -235,6 +251,12 @@ lines ~849-863.)
   ~ clean). Computed on `clean_sig` (pre-bandpass).
 - **ZSQI** (`zcr_sqi.windowed_zcr`): windowed zero-crossing rate of the
   mean-subtracted signal, `window=5 s`, `step=1 s`. Reports mean/std/max.
+- **KSQI** (`KSQI_algorithm.Ksqi`): kurtosis, `mean(((x-mu)/sigma)^4)` (population
+  sigma), **Pearson / non-excess** form -- no `-3`, so Gaussian = 3.0. Elgendi
+  2016: clean finger PPG ~ 2.06 +/- 0.16. Computed on `clean_sig`
+  (pre-bandpass). Reported only -- excluded from the verdict roll-up and from
+  any acceptance gate (Elgendi ranked it last of eight PPG SQIs for class
+  discrimination).
 
 ---
 
@@ -252,7 +274,7 @@ vectors.
 `analyze_all_sessions` runs `analyze_session` over every `MDPIdata/session_*/`,
 then aggregates:
 - `_aggregate_per_site`: groups channels by labelled body site, reports
-  mean +/- std (`ddof=1`) for SSQI, ZSQI, CCC, ICC, Pearson, bias, LOA span,
+  mean +/- std (`ddof=1`) for SSQI, ZSQI, KSQI, CCC, ICC, Pearson, bias, LOA span,
   RMSE, MAE. Site-level CCC/ICC/etc. only include channels with >= 2 matched beats.
 - `_hr_agreement_per_channel`, `_sdnn_agreement_per_channel`,
   `_lfhf_agreement_per_channel`: one paired point per session per channel,
@@ -268,9 +290,14 @@ Standard methods that **do** match the cited literature as implemented:
 - Lin's CCC formula and population-variance denominator (Lin 1989). OK.
 - Bland-Altman bias +/- 1.96 SD limits of agreement. OK.
 - ICC(A,1) absolute-agreement choice for method comparison. OK.
-- Task Force 1996 SDNN definition and VLF/LF/HF band edges (via pyhrv). OK.
+- Task Force 1996 SDNN definition and VLF/LF/HF band edges (scipy Welch). OK.
 - Karlsson 1987 20% local-median ectopic rule, [300,2000] ms gate. OK.
 - SSQI skewness as a PPG quality index (Krishnan 2010, Elgendi). OK.
+- KSQI kurtosis in the Pearson (non-excess) form, matching Elgendi 2016 eq. and
+  `vital_sqi`. OK. Band edges in `_grade_ksqi_text` are dashboard reading aids
+  anchored to Elgendi's per-class values plus the sinusoid (1.5) / Gaussian
+  (3.0) reference points -- Elgendi publishes no KSQI cut-off, so do not cite
+  them as literature thresholds.
 
 Discrepancies / items to resolve before citing methods:
 

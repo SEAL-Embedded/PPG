@@ -95,6 +95,7 @@ Click any session card. The detail column fills with:
   | fs (Hz)    | Effective sample rate, inferred from timestamp deltas      |
   | SSQI       | Skewness of the raw PPG signal (Krishnan et al. 2010)      |
   | ZSQI μ / σ | Mean and std of windowed zero-crossing rate (5-s windows)  |
+  | KSQI       | Kurtosis of the raw PPG signal, Pearson/non-excess (Elgendi 2016) — clean PPG ≈ 2 |
   | Matched    | Number of RR–PPI pairs after nearest-neighbour matching    |
   | CCC        | Lin's concordance correlation coefficient                  |
   | ICC        | Intraclass correlation, pingouin `ICC(A,1)` — two-way mixed, absolute agreement |
@@ -108,7 +109,7 @@ Click any session card. The detail column fills with:
 - **Bland-Altman per channel** — one scatter card per matched-beat channel showing PPI − RR (y) against mean (x), with the bias line in grey and the LOA± lines in red dashes. Plotted on the matched **intervals**, not the raw waveform samples (those have different shapes — see [§9 of the top-level README](../README.md)).
 - **Run history** — collapsible timeline; see [§7](#7-run-history--receiver-log).
 
-The **Window (s)** controls in the header crop every signal to a [start, end] window (seconds since the session's ECG t0) before any peak detection — so SSQI, ZSQI, R-peaks, RR/PPI, and CCC are all computed on the selected window only. **Full** restores the whole recording.
+The **Window (s)** controls in the header crop every signal to a [start, end] window (seconds since the session's ECG t0) before any peak detection — so SSQI, ZSQI, KSQI, R-peaks, RR/PPI, and CCC are all computed on the selected window only. **Full** restores the whole recording.
 
 `Run analysis` re-runs the pipeline (useful after editing the site map). `Reload signals` refetches the CSVs if you copied a session in from another machine. Both write `analysis.json` and append an `analysis_run` history event.
 
@@ -131,21 +132,22 @@ After every analysis run, the dashboard renders a block above the SQI table that
 
 - **Notes** — best/weakest channel callouts, fs warnings, anything that doesn't fit a verdict card.
 
-Read [`../docs/INTERPRETATION_GUIDE.md`](../docs/INTERPRETATION_GUIDE.md) for the exact thresholds (Lin 1989 for CCC, Cicchetti 1994 for ICC, Krishnan 2010-style SSQI bands, ZSQI heuristics for sensor contact).
+Read [`../docs/INTERPRETATION_GUIDE.md`](../docs/INTERPRETATION_GUIDE.md) for the exact thresholds (Lin 1989 for CCC, Cicchetti 1994 for ICC, Krishnan 2010-style SSQI bands, ZSQI heuristics for sensor contact, Elgendi 2016-anchored KSQI bands).
 
 ## 6. Batch analysis across MDPIdata
 
-Click **▦ Analyze all sessions** in the sessions sidebar. The dashboard runs `analyze_session` against every `MDPIdata/session_*/` folder, aggregates the per-channel results by body site, computes the cross-channel mean ± std, and produces a batch-level interpretation. The result replaces the detail column with a three-block batch view:
+Click **▦ Analyze all sessions** in the sessions sidebar. The dashboard runs `analyze_session` against every `MDPIdata/session_*/` folder, aggregates the per-channel results by body site, computes the cross-channel mean ± std, and produces a batch-level interpretation. The result replaces the detail column with a four-block batch view:
 
 1. **Batch interpretation** — headline ("Across 4 sessions and 5 body sites: best site is finger (mean CCC 0.20, only poor agreement)."), per-site verdicts (grade-coloured rows), and notes (performance gap, failed sessions, FST availability).
-2. **Per-site aggregate** — one row per body site (`finger`, `earlobe`, `forehead`, `shoulder`, `wrist`, …) with mean ± std for SSQI, ZSQI, CCC, ICC, Pearson, bias, LOA span, RMSE, MAE. Click any column header to sort (▴ ▾ tri-state). The first column has a stronger border and rows alternate-tint for scanning.
-3. **Per-session × per-channel** — every channel of every session, grouped under a sticky session-header row showing the full `session_YYYYMMDD_HHMMSS` id (clickable — drills into the per-session view), PID, FST tag, mean HR, duration, and channel count.
+2. **Per-site aggregate** — one row per body site (`finger`, `earlobe`, `forehead`, `shoulder`, `wrist`, …) with mean ± std for SSQI, ZSQI, KSQI, CCC, ICC, Pearson, bias, LOA span, RMSE, MAE. Click any column header to sort (▴ ▾ tri-state). The first column has a stronger border and rows alternate-tint for scanning.
+3. **Stratified by skin color** — the per-site / HR / SDNN / LF-HF tables repeated inside one bordered block per Fitzpatrick band: **light I–II**, **medium III–IV**, **dark V–VI** (`analysis._stratify_by_skin`). Each block's header carries its session count. Sessions with no FST grade are excluded from every band, so the three counts need not sum to the cohort total; bands with no graded sessions render empty rather than disappearing, so the layout is stable across runs. These tables are static (no column sorting) — sort the main per-site table instead. This is the subgroup breakdown the manuscript's skin-tone analysis is built from.
+4. **Per-session × per-channel** — every channel of every session, grouped under a sticky session-header row showing the full `session_YYYYMMDD_HHMMSS` id (clickable — drills into the per-session view), PID, FST tag, mean HR, duration, and channel count.
 
 Top of the batch view:
 
 - **● LIVE RUN** badge for a fresh run, **ARCHIVE · BATCH_<ts>** for an archive load.
 - **Re-run** — re-runs against the same crop window.
-- **⤓ Export CSV** — downloads the per-site aggregate as a CSV (`per_site_<batch_id>.csv`).
+- **⤓ Export CSV** — downloads **every table in the batch view** as one CSV (`<batch_id>.csv`): all 17 blocks (per-site, HR, SDNN, LF/HF, the same four per skin-tone band, and per-session × per-channel). Each block gets a title row and is separated by a blank line, so a block selects cleanly in a spreadsheet and pastes into Word as its own table. Cells keep their on-screen form (`2.728 ± 1.206`) rather than splitting mean/std into separate columns. In the per-session × per-channel block the session id, which is a group header row on screen, becomes a `Session` column on every row. The export is built by walking the rendered view, so a column added to any table appears in the CSV automatically.
 - **Close batch view** — returns to the per-session detail column.
 
 The active crop window from the per-session header is reused for every session in the batch, so the cropped numbers stay comparable to whatever you were last looking at.

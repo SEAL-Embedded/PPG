@@ -22,9 +22,9 @@ matplotlib
 # Tests
 pytest
 
-# --- Optional: legacy HRV scripts only ---
-# `pyhrv` is only imported by signal_visualization/ppgvis.py (legacy). It pulls
-# in `spectrum`, which needs a C/Fortran toolchain on Windows and often fails
-# to build. The dashboard does NOT need it. If you want the legacy HRV scripts,
-# install Microsoft C++ Build Tools first, then:
-#     pip install pyhrv
+# --- NOT required: pyhrv ---
+# `pyhrv` pulls in `spectrum`, which needs a C/Fortran toolchain and often
+# fails to build; it is also unmaintained and predates numpy 2. The dashboard
+# does not need it: the frequency-domain HRV metrics (VLF/LF/HF power, LF/HF
+# ratio) run on scipy.signal.welch in webapp/analysis.py:_freq_domain_metrics,
+# using the same 4 Hz cubic-spline + Task Force 1996 bands method pyhrv used.

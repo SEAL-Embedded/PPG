@@ -5,6 +5,7 @@ For one ``session_<ts>/`` folder we run:
 
     SSQI    skewness of the raw PPG    (sqi.SSQI_algorithm.Ssqi)
     ZSQI    windowed zero-crossing     (sqi.zcr_sqi.windowed_zcr)
+    KSQI    kurtosis of the raw PPG    (sqi.KSQI_algorithm.Ksqi)
     CCC     RR (ECG) vs PPI (PPG)      (sqi.ccc.*)
             -> Lin's CCC, Pearson r, Bland-Altman, RMSE, MAE
 
@@ -22,12 +23,12 @@ import glob
 import os
 import re
 
-# pyhrv.welch_psd (and pingouin) build throwaway matplotlib figures during
+# pingouin builds throwaway matplotlib figures during
 # analysis. This runs on uvicorn worker threads, so the default interactive
 # Tk backend creates Tk objects off the main thread — their garbage-collected
 # __del__ then raises "main thread is not in main loop" and the process-killing
 # "Tcl_AsyncDelete: async handler deleted by the wrong thread". Pin the headless
-# Agg backend before any import can pull in pyplot. Must precede the pyhrv /
+# Agg backend before any import can pull in pyplot. Must precede the
 # pingouin / sqi imports below.
 import matplotlib
 matplotlib.use("Agg")
@@ -35,7 +36,7 @@ matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
-from scipy.signal import butter, filtfilt, find_peaks
+from scipy.signal import butter, detrend, filtfilt, find_peaks, welch
 
 from sqi.ccc import (
     bandpass,
@@ -46,6 +47,7 @@ from sqi.ccc import (
     match_intervals,
     peaks_to_intervals,
 )
+from sqi.KSQI_algorithm import Ksqi
 from sqi.SSQI_algorithm import Ssqi
 from sqi.zcr_sqi import windowed_zcr
 from sqi.hrv_clean import clean_intervals
@@ -60,14 +62,14 @@ try:
 except Exception:        # pragma: no cover — package optional
     _pg = None
 
-# pyhrv backs the frequency-domain metrics (LF / HF / LF-HF ratio) the same
-# way old/PPGanalysis.py did — Welch PSD on cubic-spline-resampled NN, with
-# Task Force 1996 band definitions. Lazy-guarded so a missing install just
-# gives NaN powers rather than crashing analyze_session.
-try:
-    from pyhrv.frequency_domain import welch_psd as _pyhrv_welch_psd
-except Exception:        # pragma: no cover — package optional
-    _pyhrv_welch_psd = None
+# Frequency-domain HRV (LF / HF / LF-HF ratio) runs on scipy directly — see
+# _freq_domain_metrics. This used to call pyhrv.frequency_domain.welch_psd
+# behind a try/except, but pyhrv pulls in `spectrum` (needs a C/Fortran
+# toolchain), is unmaintained, and predates numpy 2, so it is not installed
+# here — and requirements.txt lists it as optional/legacy on purpose. The
+# guard meant every LF/HF cell silently came back NaN and the LF/HF batch
+# table rendered empty. scipy (already a hard dependency) does the same
+# Welch PSD, so the metric now always computes.
 
 
 CHANNEL_RE = re.compile(r".*ppg_data_ch(\d+)\.csv$")
@@ -143,10 +145,34 @@ def ppg_bandpass(sig, fs, lowcut=0.5, highcut=8.0, order=2):
 
 
 def infer_fs(ts_ms):
+    """Instantaneous cadence: 1 / median(inter-sample interval).
+
+    This is the *typical* spacing between consecutive good samples, so it
+    is robust to a handful of oversized gaps. It is the right rate for the
+    signal-processing grid (``_resample_uniform``) and for Butterworth
+    filter design, which want the local sampling period rather than the
+    long-run average. It is NOT the true throughput — see ``effective_fs``.
+    """
     if len(ts_ms) < 2:
         return float("nan")
     dt = float(np.median(np.diff(ts_ms)))
     return 1000.0 / dt if dt > 0 else float("nan")
+
+
+def effective_fs(ts_ms):
+    """Actual average sampling rate: samples over the wall-clock span they
+    cover, i.e. (N - 1) / (t_last - t_first). This is what the dashboard
+    reports.
+
+    Unlike ``infer_fs`` (median inter-sample rate), this counts every gap,
+    stall, and dropped burst against the rate, so a channel that briefly
+    hits 400 Hz but is starved for ~40% of the recording reports its true
+    ~185 Hz throughput rather than the 375 Hz the median would show.
+    """
+    if len(ts_ms) < 2:
+        return float("nan")
+    span_ms = float(ts_ms[-1] - ts_ms[0])
+    return (len(ts_ms) - 1) * 1000.0 / span_ms if span_ms > 0 else float("nan")
 
 
 # ── Hybrid PPG conditioning + peak detection ─────────────────────────────────
@@ -158,8 +184,38 @@ def infer_fs(ts_ms):
 # better on this rig's raw-ADC data: a *scale-relative* prominence
 # (ppgvis's absolute prominence=1.1 is ~0 on counts-in-the-thousands), and
 # interval timing off the *recorded* timestamps rather than the resample
-# grid. SSQI is deliberately NOT computed on the bandpassed signal — the
-# band-pass distorts the pulse shape and skew.
+# grid. SSQI/KSQI are deliberately NOT computed on the bandpassed signal —
+# the band-pass distorts the pulse shape, and with it both the skew and the
+# tail weight the two moments measure.
+
+def _fix_timestamp_spikes(ts_ms, sig, jump_factor=50.0):
+    """Repair samples whose timestamp jumps implausibly far (in either
+    direction) from the recording's own sample spacing, e.g. a firmware
+    tick-counter glitch/32-bit rollover, by resetting that one step to the
+    median inter-sample interval instead of trusting the raw delta.
+
+    Left uncorrected, a single such jump inflates any duration computed as
+    ts[-1]-ts[0] (see analyze_channel's mean_hr_bpm) and, downstream, makes
+    _drop_non_monotonic discard every real sample that follows once the
+    corrupted value becomes the new running max. ``jump_factor`` is kept
+    large so ordinary back-dated bursts (handled separately below) are left
+    alone — only jumps far outside anything plausible get reset.
+    """
+    if len(ts_ms) < 3:
+        return ts_ms, sig
+    deltas = np.diff(ts_ms).astype(float)
+    median_dt = np.median(deltas)
+    if median_dt <= 0:
+        return ts_ms, sig
+    bad = np.abs(deltas - median_dt) > jump_factor * median_dt
+    if not bad.any():
+        return ts_ms, sig
+    deltas[bad] = median_dt
+    fixed = np.empty(len(ts_ms), dtype=float)
+    fixed[0] = ts_ms[0]
+    fixed[1:] = ts_ms[0] + np.cumsum(deltas)
+    return fixed, sig
+
 
 def _drop_non_monotonic(ts_ms, sig):
     """Drop samples whose timestamp doesn't strictly exceed the running max.
@@ -531,44 +587,83 @@ def _windowed_sdnn_agreement(ecg_ts_ms, ecg_peaks, ppg_ts_ms, ppg_peaks,
     return out
 
 
+# Task Force (1996) frequency bands, in Hz — the same edges pyhrv's
+# welch_psd integrates over by default. VLF starts at 0.003 Hz rather than 0
+# so the DC/trend bin doesn't land in the band.
+_HRV_BANDS = (("vlf", 0.003, 0.04), ("lf", 0.04, 0.15), ("hf", 0.15, 0.40))
+
+# The NN series carries one value per beat, i.e. it is sampled unevenly at
+# ~1 Hz. 4 Hz is the standard HRV resampling rate (Task Force 1996) and is
+# what pyhrv used: comfortably above twice the 0.4 Hz top of the HF band.
+_HRV_RESAMPLE_HZ = 4.0
+
+# numpy 2 renamed trapz -> trapezoid; trapz still exists but deprecation-warns.
+_trapz = getattr(np, "trapezoid", None) or np.trapz
+
+
 def _freq_domain_metrics(nn_ms, min_beats=50):
-    """Frequency-domain HRV via pyhrv.welch_psd — same call old/PPGanalysis.py
-    uses. Returns absolute VLF / LF / HF power (ms²) and LF/HF ratio.
+    """Frequency-domain HRV by Welch PSD. Returns absolute VLF / LF / HF
+    power (ms²) and the LF/HF ratio.
 
-    pyhrv internally cubic-spline resamples the NN series to 4 Hz and runs
-    scipy.signal.welch (nperseg=300 by default), then integrates over the
-    Task Force 1996 bands (VLF 0-0.04, LF 0.04-0.15, HF 0.15-0.40 Hz). NN
-    intervals must be in **milliseconds**; passing seconds (as PPGanalysis
-    does, almost certainly a bug) gives band powers that are 1e-6× too small.
+    Method (unchanged from the pyhrv.welch_psd call this replaces, which
+    documented exactly these steps): place each NN interval at its cumulative
+    beat time, cubic-spline resample onto a uniform 4 Hz grid, remove the
+    linear trend, run ``scipy.signal.welch`` with a Hamming window, then
+    integrate the PSD over the Task Force 1996 bands (VLF 0.003-0.04,
+    LF 0.04-0.15, HF 0.15-0.40 Hz). Integrating a density in ms²/Hz over Hz
+    gives ms², so NN intervals must be in **milliseconds** — passing seconds
+    (as old/PPGanalysis.py does, almost certainly a bug) gives band powers
+    1e-6× too small.
 
-    Returns a NaN-filled dict if pyhrv isn't installed or the series is too
-    short. ``min_beats`` is the soft floor; pyhrv may still fail on edge
-    cases (very short or very irregular NN), in which case we silently
-    return the NaN dict — a single failing channel can't poison the session."""
+    Returns a NaN-filled dict when the series is shorter than ``min_beats``
+    or too short to resample. Any unexpected failure also returns the NaN
+    dict rather than raising — one bad channel must not poison a session."""
     out = {
         "vlf_power_ms2": float("nan"),
         "lf_power_ms2":  float("nan"),
         "hf_power_ms2":  float("nan"),
         "lf_hf_ratio":   float("nan"),
     }
-    if _pyhrv_welch_psd is None or len(nn_ms) < min_beats:
+    nn = np.asarray(nn_ms, dtype=float)
+    nn = nn[np.isfinite(nn)]
+    if len(nn) < min_beats:
         return out
     try:
-        import warnings
-        # pyhrv emits a figure even with show=False; tear it down so the
-        # backend's figure stack doesn't accumulate across N sessions × M
-        # channels. Importing matplotlib lazily so this stays the only
-        # place that touches the plot stack.
-        import matplotlib.pyplot as plt
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            r = _pyhrv_welch_psd(nni=np.asarray(nn_ms, dtype=float), show=False)
-        plt.close("all")
-        # ReturnTuple supports r["key"] indexing (but no .get()).
-        out["vlf_power_ms2"] = float(r["fft_abs"][0])
-        out["lf_power_ms2"]  = float(r["fft_abs"][1])
-        out["hf_power_ms2"]  = float(r["fft_abs"][2])
-        out["lf_hf_ratio"]   = float(r["fft_ratio"])
+        # Beat times: the k-th NN interval ends at the cumulative sum of the
+        # intervals before it. Rebased to 0 so the grid starts at the origin.
+        t_s = np.cumsum(nn) / 1000.0
+        t_s -= t_s[0]
+        if t_s[-1] <= 0:
+            return out
+
+        grid = np.arange(0.0, t_s[-1], 1.0 / _HRV_RESAMPLE_HZ)
+        # Welch needs enough samples for at least one full segment; a
+        # recording this short has no meaningful LF content anyway.
+        if len(grid) < 16:
+            return out
+        x = interp1d(t_s, nn, kind="cubic")(grid)
+        # Linear detrend: an HRV series drifts with respiration/posture, and
+        # that trend would otherwise dump power into VLF and leak upward.
+        x = detrend(x, type="linear")
+
+        # nperseg=300 (75 s at 4 Hz) matches the pyhrv default this replaces
+        # and resolves the 0.04 Hz LF edge; clamped so short series still
+        # produce a single segment. nfft is padded for a smooth band edge.
+        nperseg = int(min(len(x), 300))
+        f, pxx = welch(x, fs=_HRV_RESAMPLE_HZ, window="hamming",
+                       nperseg=nperseg, nfft=max(nperseg, 4096),
+                       scaling="density")
+
+        powers = {}
+        for name, lo, hi in _HRV_BANDS:
+            mask = (f >= lo) & (f < hi)
+            powers[name] = float(_trapz(pxx[mask], f[mask])) if mask.any() else float("nan")
+
+        out["vlf_power_ms2"] = powers["vlf"]
+        out["lf_power_ms2"]  = powers["lf"]
+        out["hf_power_ms2"]  = powers["hf"]
+        if np.isfinite(powers["lf"]) and np.isfinite(powers["hf"]) and powers["hf"] > 0:
+            out["lf_hf_ratio"] = powers["lf"] / powers["hf"]
     except Exception:
         pass
     return out
@@ -698,7 +793,7 @@ def load_session_signals(name, max_points=5000, tail_seconds=None,
                 "time_s": xs.tolist(),
                 "signal": ys.tolist(),
                 "leads_off_spans": spans,
-                "fs_hz": infer_fs(ts_ms),
+                "fs_hz": effective_fs(ts_ms),
                 "n_samples": int(len(sig)),
             }
 
@@ -715,13 +810,16 @@ def load_session_signals(name, max_points=5000, tail_seconds=None,
             continue
         n_recorded = int(len(sig))
         # Condition exactly like analyze_channel so the displayed trace IS the
-        # signal the peaks were detected on: drop backward-stepping timestamps
-        # -> cubic resample onto a uniform grid -> rolling-median outlier
-        # scrub. The peak markers (timed in grid seconds by analyze_channel)
-        # then sit on this interpolated trace instead of having their Y pulled
-        # from the raw samples.
+        # signal the peaks were detected on: reset implausible timestamp
+        # spikes -> drop backward-stepping timestamps -> cubic resample onto
+        # a uniform grid -> rolling-median outlier scrub. The peak markers
+        # (timed in grid seconds by analyze_channel) then sit on this
+        # interpolated trace instead of having their Y pulled from the raw
+        # samples.
+        ts_ms, sig = _fix_timestamp_spikes(ts_ms, sig)
         ts_ms, sig = _drop_non_monotonic(ts_ms, sig)
-        fs = infer_fs(ts_ms)
+        fs = infer_fs(ts_ms)          # grid + filter cadence
+        disp_fs = effective_fs(ts_ms)  # actual throughput shown in the UI
         grid_ts_ms, grid_sig = _resample_uniform(ts_ms, sig, fs)
         clean_sig = _remove_outliers(grid_sig)
         ts_s = (grid_ts_ms - t0_ms) / 1000.0
@@ -741,7 +839,7 @@ def load_session_signals(name, max_points=5000, tail_seconds=None,
             "signal": ys.tolist(),
             "time_bp_s": bp_x,
             "signal_bp": bp_y,
-            "fs_hz": fs,
+            "fs_hz": disp_fs,
             "n_samples": n_recorded,
         })
 
@@ -784,7 +882,7 @@ def ecg_detail(name, start_s=None, end_s=None):
         "name": name,
         "time_s": ts_s.tolist(),
         "signal": sig.tolist(),
-        "fs_hz": fs,
+        "fs_hz": effective_fs(ts_ms),
         "n_samples": int(len(sig)),
         "duration_s": dur,
         "n_peaks": int(len(peaks)),
@@ -832,6 +930,16 @@ def _safe_ssqi(sig):
     if std == 0.0:
         return float("nan")
     return float(Ssqi(sig))
+
+
+def _safe_ksqi(sig):
+    """Pearson kurtosis of the same trace SSQI sees (same NaN guards)."""
+    if len(sig) < 2:
+        return float("nan")
+    std = float(np.std(sig, ddof=0))
+    if std == 0.0:
+        return float("nan")
+    return float(Ksqi(sig))
 
 
 def _safe_icc(matched_rr_ms, matched_ppi_ms):
@@ -892,11 +1000,13 @@ def analyze_channel(ppg_ts_ms, ppg_sig, ecg_ts_ms, ecg_sig, t0_ms=0.0,
     end can overlay markers on the downsampled Plotly signal traces
     without doing its own unit conversion.
     """
-    # Hybrid conditioning: drop backward-stepping timestamps, resample onto
-    # a uniform grid at the measured fs (so the Butterworth filters run on
-    # evenly-sampled data), then scrub motion spikes. clean_sig is the
-    # resampled, outlier-removed, *pre-bandpass* trace — SSQI/ZSQI run on
-    # it; the bandpass happens inside the peak detector only.
+    # Hybrid conditioning: reset implausible timestamp spikes, drop
+    # backward-stepping timestamps, resample onto a uniform grid at the
+    # measured fs (so the Butterworth filters run on evenly-sampled data),
+    # then scrub motion spikes. clean_sig is the resampled, outlier-removed,
+    # *pre-bandpass* trace — SSQI/KSQI/ZSQI run on it; the bandpass happens
+    # inside the peak detector only.
+    ppg_ts_ms, ppg_sig = _fix_timestamp_spikes(ppg_ts_ms, ppg_sig)
     ppg_ts_ms, ppg_sig = _drop_non_monotonic(ppg_ts_ms, ppg_sig)
     ppg_fs = infer_fs(ppg_ts_ms)
     ecg_fs = infer_fs(ecg_ts_ms)
@@ -905,14 +1015,15 @@ def analyze_channel(ppg_ts_ms, ppg_sig, ecg_ts_ms, ecg_sig, t0_ms=0.0,
     clean_sig = _remove_outliers(grid_sig)
 
     result = {
-        "ppg_fs_hz": ppg_fs,
-        "ecg_fs_hz": ecg_fs,
+        "ppg_fs_hz": effective_fs(ppg_ts_ms),
+        "ecg_fs_hz": effective_fs(ecg_ts_ms),
         "n_ppg_samples": int(len(ppg_sig)),
         "n_ecg_samples": int(len(ecg_sig)),
         "ssqi": _safe_ssqi(clean_sig),
         "zsqi_mean": float("nan"),
         "zsqi_std": float("nan"),
         "zsqi_max": float("nan"),
+        "ksqi": _safe_ksqi(clean_sig),
         "n_rr_intervals": 0,
         "n_ppi_intervals": 0,
         "n_matched_beats": 0,
@@ -980,7 +1091,7 @@ def analyze_channel(ppg_ts_ms, ppg_sig, ecg_ts_ms, ecg_sig, t0_ms=0.0,
         if len(ppi_clean_ms) >= 2:
             result["sdnn_ms"] = float(np.std(ppi_clean_ms, ddof=1))
 
-        # Per-channel frequency-domain HRV (pyhrv welch_psd) on the cleaned
+        # Per-channel frequency-domain HRV (Welch PSD) on the cleaned
         # NN series. Matches manuscript §2.6 (Lomb-Scargle / Welch on NN,
         # not RR).
         ppg_fd = _freq_domain_metrics(ppi_clean_ms)
@@ -1076,11 +1187,11 @@ def analyze_session(name, start_s=None, end_s=None):
         ecg_nn_ms = np.array([], dtype=float)
     ecg_sdnn_ms = float(np.std(ecg_nn_ms, ddof=1)) if len(ecg_nn_ms) >= 2 else float("nan")
 
-    # ECG frequency-domain HRV via pyhrv (matches old/PPGanalysis.py).
+    # ECG frequency-domain HRV via Welch PSD (matches old/PPGanalysis.py).
     ecg_fd = _freq_domain_metrics(ecg_nn_ms)
 
     ecg_info = {
-        "fs_hz": ecg_fs,
+        "fs_hz": effective_fs(ecg_ts_ms),
         "n_samples": int(len(ecg_sig)),
         "duration_s": duration_s,
         "n_peaks": int(len(ecg_peaks)),
@@ -1132,12 +1243,31 @@ def _mean_std(values):
     }
 
 
+# Body sites in mux-lane order (ch0 → ch4: finger, earlobe, shoulder,
+# forehead, wrist) rather than alphabetical. Alphabetical put earlobe first,
+# which read as arbitrary and did not line up with the per-channel tables
+# above it — those are ordered by channel, so both now agree finger-first.
+# A site outside the default map (a hand-edited label) sorts alphabetically
+# after the known ones instead of being dropped.
+_SITE_ORDER = list(dict.fromkeys(
+    sessions.DEFAULT_CHANNEL_SITES[k]
+    for k in sorted(sessions.DEFAULT_CHANNEL_SITES, key=int)
+))
+
+
+def _site_sort_key(site):
+    try:
+        return (0, _SITE_ORDER.index(site), "")
+    except ValueError:
+        return (1, 0, site)
+
+
 def _aggregate_per_site(per_session):
     """Collapse per-session × per-channel rows into one row per body site.
 
     Groups every channel in every session by its labelled site (using the
     fixed mux-lane → site fallback from sessions._with_default_sites for
-    sessions without an explicit map), then summarises SSQI, ZSQI, CCC,
+    sessions without an explicit map), then summarises SSQI, ZSQI, KSQI, CCC,
     Pearson, bias, LOA span, RMSE, MAE, and ICC3 as mean ± std across
     the group. This is the site-level table the manuscript's results
     section is built around — currently unstratified by Fitzpatrick
@@ -1150,8 +1280,9 @@ def _aggregate_per_site(per_session):
             by_site.setdefault(site, []).append(row)
 
     out = []
-    for site, rows in sorted(by_site.items()):
+    for site, rows in sorted(by_site.items(), key=lambda kv: _site_sort_key(kv[0])):
         ssqis    = [r.get("ssqi") for r in rows]
+        ksqis    = [r.get("ksqi") for r in rows]
         zsqi_mu  = [r.get("zsqi_mean") for r in rows]
         zsqi_sd  = [r.get("zsqi_std") for r in rows]
         cccs     = [r["stats"]["ccc"] for r in rows if r.get("stats")]
@@ -1171,6 +1302,7 @@ def _aggregate_per_site(per_session):
             "ssqi":       _mean_std(ssqis),
             "zsqi_mean":  _mean_std(zsqi_mu),
             "zsqi_std":   _mean_std(zsqi_sd),
+            "ksqi":       _mean_std(ksqis),
             "ccc":        _mean_std(cccs),
             "icc":        _mean_std(iccs),
             "pearson_r":  _mean_std(pearsons),
@@ -1184,7 +1316,7 @@ def _aggregate_per_site(per_session):
 
 
 def _lfhf_agreement_per_channel(per_session):
-    """Per-session LF/HF ratio (pyhrv welch_psd) paired with ECG LF/HF and
+    """Per-session LF/HF ratio (Welch PSD) paired with ECG LF/HF and
     aggregated across sessions per channel. Same shape as ``_hr_agreement_
     per_channel``; unitless ratio (no _ms / _bpm suffix on bias/LOA)."""
     by_ch = {}
@@ -1372,6 +1504,57 @@ def _hr_agreement_per_channel(per_session):
     return rows
 
 
+# Fitzpatrick skin-tone bands used to stratify the batch. Light = I-II,
+# medium = III-IV, dark = V-VI (2 grades each, unlike sleepiness.py's
+# I-III / IV-VI split — this is the manuscript's three-band scheme).
+_SKIN_GROUPS = [
+    ("light",  "I-II",   (1, 2)),
+    ("medium", "III-IV", (3, 4)),
+    ("dark",   "V-VI",   (5, 6)),
+]
+
+
+def _skin_group_of(fst):
+    """Map a Fitzpatrick grade (1-6) to a skin-tone band name, or None if
+    ungraded / out of range."""
+    if fst is None:
+        return None
+    try:
+        f = int(fst)
+    except (TypeError, ValueError):
+        return None
+    for name, _, (lo, hi) in _SKIN_GROUPS:
+        if lo <= f <= hi:
+            return name
+    return None
+
+
+def _stratify_by_skin(per_session):
+    """Re-run the four batch aggregations (per-site, HR, SDNN, LF/HF) within
+    each Fitzpatrick skin-tone band. Sessions with no FST grade are dropped
+    from every stratum. Always returns all three bands (empty tables when a
+    band has no graded sessions) so the frontend renders a stable layout."""
+    buckets = {name: [] for name, _, _ in _SKIN_GROUPS}
+    for s in per_session:
+        group = _skin_group_of((s.get("participant") or {}).get("fitzpatrick"))
+        if group is not None:
+            buckets[group].append(s)
+
+    out = []
+    for name, fst_range, _ in _SKIN_GROUPS:
+        subset = buckets[name]
+        out.append({
+            "group":            name,
+            "fst_range":        fst_range,
+            "n_sessions":       len(subset),
+            "per_site":         _aggregate_per_site(subset),
+            "hr_per_channel":   _hr_agreement_per_channel(subset),
+            "sdnn_per_channel": _sdnn_agreement_per_channel(subset),
+            "lfhf_per_channel": _lfhf_agreement_per_channel(subset),
+        })
+    return out
+
+
 def analyze_all_sessions(start_s=None, end_s=None, use_saved_windows=False):
     """Run analyze_session on every session_*/ folder under MDPIdata/.
 
@@ -1439,6 +1622,7 @@ def analyze_all_sessions(start_s=None, end_s=None, use_saved_windows=False):
         "hr_per_channel":       hr_per_channel,
         "sdnn_per_channel":     sdnn_per_channel,
         "lfhf_per_channel":     lfhf_per_channel,
+        "stratified_by_skin":   _stratify_by_skin(per_session),
         "fst_unavailable":      not any_fst,
         "use_saved_windows":    use_saved_windows,
         "crop_window": ({"per_session": True} if use_saved_windows
@@ -1479,6 +1663,38 @@ def _grade_ssqi_text(v):
     if v > 0.5:   return ("good",      f"SSQI {v:+.2f} — positive skew, pulse shape is recognisable")
     if v > -0.5:  return ("borderline",f"SSQI {v:+.2f} — near-zero skew, waveform shape is weak or noisy")
     return                ("bad",      f"SSQI {v:+.2f} — negative skew, signal likely inverted, saturated, or dominated by noise")
+
+
+def _grade_ksqi_text(v):
+    """KSQI = Pearson (non-excess) kurtosis of the raw PPG — the fourth
+    standardised moment, so Gaussian noise scores 3.0.
+
+    Unlike SSQI this index is *two-sided*: a clean pulsatile PPG sits near 2
+    (Elgendi 2016 measured 2.06 ± 0.16 on adjudicator-rated "excellent" 60 s
+    finger PPG; a pure sinusoid is 1.5), and both directions away from that
+    band mean something different. Drifting up toward 3 means the pulse no
+    longer dominates the amplitude distribution — the trace is noise-shaped.
+    Well above 3 means heavy tails from impulsive motion / contact spikes.
+    Below ~1.5 means a sub-sinusoidal, bimodal distribution: clipping, ADC
+    saturation, or a squared-off waveform.
+
+    Bands are anchored to Elgendi 2016 Table 2 (excellent-class mean ± 2 SD
+    ≈ [1.74, 2.38]) plus the two analytic reference points (sinusoid 1.5,
+    Gaussian 3.0). Note Elgendi ranked KSQI *last* of eight PPG SQIs for
+    class discrimination, so it is reported, never used to gate."""
+    if v is None or not np.isfinite(v):
+        return ("undefined", "KSQI undefined (signal too short or constant)")
+    if v < 1.2:
+        return ("bad",       f"KSQI {v:.2f} — far below the sinusoid floor (1.5), amplitude distribution is bimodal: clipping or ADC saturation")
+    if v < 1.5:
+        return ("borderline",f"KSQI {v:.2f} — below the sinusoid floor, waveform is squared-off or partially clipped")
+    if v <= 2.5:
+        return ("very good", f"KSQI {v:.2f} — in the clean-PPG band around 2 (Elgendi 2016: 2.06±0.16 for excellent finger PPG)")
+    if v <= 3.0:
+        return ("good",      f"KSQI {v:.2f} — slightly peaked but still pulse-dominated")
+    if v <= 5.0:
+        return ("borderline",f"KSQI {v:.2f} — at/above the Gaussian value (3.0), the pulse no longer dominates the amplitude distribution")
+    return                  ("bad",       f"KSQI {v:.2f} — heavy-tailed, dominated by impulsive motion / contact-loss spikes")
 
 
 def _grade_zsqi_text(mu, sd):
@@ -1541,10 +1757,15 @@ def interpret_channel(row):
     lines = []
     ccc_word, ccc_text = _grade_ccc_text(ccc)
     ssqi_word, ssqi_text = _grade_ssqi_text(row.get("ssqi"))
+    # KSQI is reported but deliberately not folded into the verdict roll-up
+    # below: Elgendi 2016 ranked it last of eight PPG SQIs for discriminating
+    # rated quality, so it informs the reader without moving the grade.
+    _, ksqi_text = _grade_ksqi_text(row.get("ksqi"))
     zsqi_word, zsqi_text = _grade_zsqi_text(row.get("zsqi_mean"), row.get("zsqi_std"))
 
     lines.append(ssqi_text + ".")
     lines.append(zsqi_text + ".")
+    lines.append(ksqi_text + ".")
 
     if matched == 0:
         lines.append(
@@ -1674,6 +1895,7 @@ def _site_summary(site_row):
     matched_total = site_row.get("matched_beats_total") or 0
     ccc_mu = (site_row.get("ccc") or {}).get("mean")
     ssqi_mu = (site_row.get("ssqi") or {}).get("mean")
+    ksqi_mu = (site_row.get("ksqi") or {}).get("mean")
     bias_mu = (site_row.get("bias_ms") or {}).get("mean")
 
     parts = [f"{site} (n={n} channels, Σ matched {matched_total} beats)"]
@@ -1700,6 +1922,13 @@ def _site_summary(site_row):
             parts.append(f"SSQI {ssqi_mu:+.2f} (borderline shape)")
         else:
             parts.append(f"SSQI {ssqi_mu:+.2f} (poor/inverted shape)")
+    if ksqi_mu is not None and np.isfinite(ksqi_mu):
+        if 1.5 <= ksqi_mu <= 3.0:
+            parts.append(f"KSQI {ksqi_mu:.2f} (pulse-dominated amplitude distribution)")
+        elif ksqi_mu > 3.0:
+            parts.append(f"KSQI {ksqi_mu:.2f} (heavy-tailed — impulsive artifact)")
+        else:
+            parts.append(f"KSQI {ksqi_mu:.2f} (sub-sinusoidal — clipping/saturation)")
     if bias_mu is not None and np.isfinite(bias_mu) and abs(bias_mu) > 500:
         parts.append(f"large mean bias {bias_mu:+.0f} ms — peak detector likely off for several channels")
 

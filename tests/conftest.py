@@ -219,6 +219,27 @@ def synth_inverted_ecg(synth_signal_arrays):
 
 
 @pytest.fixture
+def synth_ambiguous_polarity_ecg():
+    """ECG whose R (up) and S (down) excursions are nearly the same size, so
+    the 1st/99th-percentile polarity comparison is a coin flip.
+
+    Deliberately built with the *negative* side marginally larger, which is
+    what makes the naive `dist_low > dist_high` test flip the whole recording
+    onto the S-wave. Real example: session_20260715_153323 decided its
+    polarity on a 1.0% margin."""
+    fs = 200.0
+    duration_s = 30.0
+    n = int(duration_s * fs)
+    t = np.arange(n) / fs
+    rng = np.random.default_rng(7)
+    sig = 0.05 * np.cos(2 * np.pi * 0.3 * t) + 0.01 * rng.standard_normal(n)
+    for pt in _beat_times(duration_s=duration_s, seed=7):
+        sig += 1.00 * np.exp(-((t - pt) ** 2) / (2 * 0.012 ** 2))
+        sig -= 1.06 * np.exp(-((t - pt - 0.045) ** 2) / (2 * 0.012 ** 2))
+    return {"ts_ms": t * 1000.0, "ecg": sig, "fs": fs}
+
+
+@pytest.fixture
 def synth_single_spike_ecg(synth_signal_arrays):
     """Clean ECG plus ONE huge negative spike — must NOT auto-invert the signal."""
     ts_ms = synth_signal_arrays["ts_ms"].copy()

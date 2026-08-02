@@ -129,6 +129,7 @@ Top-level shape:
       "zsqi_mean": 0.030,
       "zsqi_std": 0.008,
       "zsqi_max": 0.052,
+      "ksqi": 2.141,
       "n_rr_intervals": 450,
       "n_ppi_intervals": 449,
       "n_matched_beats": 448,
@@ -281,6 +282,7 @@ Top-level shape:
       "ssqi":       {"mean": 0.060,  "std": 0.666,  "n": 4},
       "zsqi_mean":  {"mean": 0.034,  "std": 0.008,  "n": 4},
       "zsqi_std":   {"mean": 0.012,  "std": 0.004,  "n": 4},
+      "ksqi":       {"mean": 2.180,  "std": 0.412,  "n": 4},
       "ccc":        {"mean": 0.202,  "std": 0.394,  "n": 4},
       "icc":        {"mean": 0.202,  "std": 0.394,  "n": 4},
       "pearson_r":  {"mean": 0.238,  "std": 0.383,  "n": 4},
@@ -290,6 +292,19 @@ Top-level shape:
       "mae_ms":     {"mean": 704.6,  "std": 1076.3, "n": 4}
     },
     ...
+  ],
+  "stratified_by_skin": [
+    {
+      "group": "light",
+      "fst_range": "I-II",
+      "n_sessions": 12,
+      "per_site":         [ ... same shape as the top-level per_site ... ],
+      "hr_per_channel":   [ ... same shape as the top-level hr_per_channel ... ],
+      "sdnn_per_channel": [ ... ],
+      "lfhf_per_channel": [ ... ]
+    },
+    { "group": "medium", "fst_range": "III-IV", "n_sessions": 4,  ... },
+    { "group": "dark",   "fst_range": "V-VI",   "n_sessions": 4,  ... }
   ],
   "interpretation": {
     "headline": "Across 4 sessions and 5 body sites: best site is finger (mean CCC 0.20, only poor agreement).",
@@ -305,4 +320,6 @@ Top-level shape:
 }
 ```
 
-Each `per_site[i].{metric}` block is `{mean, std, n}` where `n` is the count of finite values that went into the aggregate (matches the `_mean_std` helper in `webapp/analysis.py`). `ssqi`, `zsqi_mean`, `zsqi_std` are aggregated over every channel of every session at that site; `ccc`, `icc`, `pearson_r`, `bias_ms`, `loa_span_ms`, `rmse_ms`, `mae_ms` only over channels that produced matched-interval `stats` (≥ 2 matched beats).
+Each `per_site[i].{metric}` block is `{mean, std, n}` where `n` is the count of finite values that went into the aggregate (matches the `_mean_std` helper in `webapp/analysis.py`). `ssqi`, `zsqi_mean`, `zsqi_std`, `ksqi` are aggregated over every channel of every session at that site; `ccc`, `icc`, `pearson_r`, `bias_ms`, `loa_span_ms`, `rmse_ms`, `mae_ms` only over channels that produced matched-interval `stats` (≥ 2 matched beats).
+
+`stratified_by_skin` repeats the four cohort aggregations (`per_site`, `hr_per_channel`, `sdnn_per_channel`, `lfhf_per_channel`) within each Fitzpatrick skin-tone band — light I–II, medium III–IV, dark V–VI (`analysis._SKIN_GROUPS`). Sessions with no FST grade are dropped from every band, so the three `n_sessions` need not sum to `n_sessions_analyzed`. All three bands are always present, with empty tables when a band has no graded sessions, so the frontend layout stays stable. Batch archives saved before this field existed simply omit the key.

@@ -19,7 +19,7 @@ Opens `http://127.0.0.1:8000/` in your browser. On first launch you'll see a 6-s
 |-----|----------------|
 | [`webapp/README.md`](webapp/README.md) | Operator's dashboard guide — every button, every panel, every modal |
 | [`docs/DASHBOARD_GUIDE.md`](docs/DASHBOARD_GUIDE.md) | Goal-oriented walkthroughs ("I want to …") with screenshots |
-| [`docs/INTERPRETATION_GUIDE.md`](docs/INTERPRETATION_GUIDE.md) | What SSQI / ZSQI / CCC / ICC / Bland-Altman mean, plus the grade thresholds |
+| [`docs/INTERPRETATION_GUIDE.md`](docs/INTERPRETATION_GUIDE.md) | What SSQI / ZSQI / KSQI / CCC / ICC / Bland-Altman mean, plus the grade thresholds |
 | [`docs/DATA_FORMATS.md`](docs/DATA_FORMATS.md) | On-disk schema for every CSV, JSON, JSONL, and log file |
 | [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | Every HTTP endpoint with request / response / side-effects |
 | [`docs/TESTING.md`](docs/TESTING.md) | How to run the pytest suite and add new tests |
@@ -45,6 +45,7 @@ PPG/
 │   ├── ccc.py                        CCC + Bland-Altman driver
 │   ├── SSQI_algorithm.py             skewness SQI
 │   ├── zcr_sqi.py                    zero-crossing rate SQI
+│   ├── KSQI_algorithm.py             kurtosis SQI (Pearson / non-excess)
 │   ├── ICC.py                        intraclass correlation (cross-subject form)
 │   └── bland_altman.py               legacy raw-signal Bland-Altman (not wired — see note below)
 ├── signal_visualization/           legacy HRV + visualisation scripts (vis.py, fullvis.py, ppgvis.py)

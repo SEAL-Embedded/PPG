@@ -7,15 +7,16 @@ This document explains every signal-quality metric the dashboard reports, the li
 1. [Why intervals, not raw waveforms](#why-intervals-not-raw-waveforms)
 2. [SSQI — skewness](#ssqi--skewness)
 3. [ZSQI — zero-crossing rate](#zsqi--zero-crossing-rate)
-4. [CCC — Lin's concordance correlation coefficient](#ccc--lins-concordance-correlation-coefficient)
-5. [ICC — intraclass correlation, ICC(A,1)](#icc--intraclass-correlation-icca1)
-6. [Bland-Altman — bias, LOA, RMSE, MAE](#bland-altman--bias-loa-rmse-mae)
-7. [Channel verdict roll-up](#channel-verdict-roll-up)
-8. [Site verdict roll-up](#site-verdict-roll-up)
-9. [Known code-vs-manuscript gaps](#known-code-vs-manuscript-gaps)
-10. [Per-HRV-feature CCC (Σ page)](#per-hrv-feature-ccc-σ-page)
-11. [Ectopic-beat / NN-interval cleaning](#ectopic-beat--nn-interval-cleaning)
-12. [ticks_us rollover unwrap](#ticks_us-rollover-unwrap)
+4. [KSQI — kurtosis](#ksqi--kurtosis)
+5. [CCC — Lin's concordance correlation coefficient](#ccc--lins-concordance-correlation-coefficient)
+6. [ICC — intraclass correlation, ICC(A,1)](#icc--intraclass-correlation-icca1)
+7. [Bland-Altman — bias, LOA, RMSE, MAE](#bland-altman--bias-loa-rmse-mae)
+8. [Channel verdict roll-up](#channel-verdict-roll-up)
+9. [Site verdict roll-up](#site-verdict-roll-up)
+10. [Known code-vs-manuscript gaps](#known-code-vs-manuscript-gaps)
+11. [Per-HRV-feature CCC (Σ page)](#per-hrv-feature-ccc-σ-page)
+12. [Ectopic-beat / NN-interval cleaning](#ectopic-beat--nn-interval-cleaning)
+13. [ticks_us rollover unwrap](#ticks_us-rollover-unwrap)
 
 ---
 
@@ -63,6 +64,51 @@ $$\mathrm{ZSQI}_{\text{win}} = \frac{|\{i : \operatorname{sign}(x_i - \bar{x}) \
 | < 0.10              | any        | **good**       | Within the typical clean-PPG range |
 | < 0.20              | any        | **borderline** | Elevated — noisy or loose contact |
 | ≥ 0.20              | any        | **bad**        | Very high — dominated by noise / motion artifact |
+
+---
+
+## KSQI — kurtosis
+
+**What it is.** The fourth standardised moment of the raw PPG signal, computed in `sqi/KSQI_algorithm.Ksqi`:
+
+$$\mathrm{KSQI} = \frac{1}{N}\sum_{i=1}^{N}\left(\frac{x_i-\mu}{\sigma}\right)^{4}$$
+
+This is the **Pearson (non-excess)** form — there is *no* $-3$ correction, so Gaussian noise scores **3.0**, not 0.0. That matches Elgendi (2016) and the `vital_sqi` toolbox, and it is why every threshold below is stated on the 3.0-is-Gaussian scale. $\sigma$ is the *population* standard deviation (`ddof=0`), identical to `Ssqi`, so the two moments share one normalisation.
+
+**Exactly what it is computed on.** The same array `SSQI` sees: `clean_sig` in `analyze_channel` — timestamp-deduplicated, cubic-resampled onto a uniform grid at the measured fs, rolling-median outlier-scrubbed, and **pre-bandpass**. The 0.5–8 Hz Butterworth lives inside the peak detector only; running KSQI after it would strip the DC/respiratory content that sets the amplitude distribution's shape and inflate the value. `_safe_ksqi` returns `NaN` for signals under 2 samples or with zero variance (the cell shows `—`).
+
+**Why kurtosis for PPG.** Kurtosis measures how much of the amplitude variance is carried by rare extreme samples. Unlike SSQI, KSQI is **two-sided** — there is a good band, and both directions away from it are a distinct failure mode:
+
+| Reference point | KSQI | What it is |
+|-----------------|------|------------|
+| Pure sinusoid   | 1.5  | Analytic floor for a smooth periodic wave |
+| Clean pulsatile PPG | ≈ 2.0 | Elgendi 2016 measured **2.06 ± 0.16** on adjudicator-rated "excellent" 60 s finger PPG |
+| Gaussian        | 3.0  | The pulse no longer dominates the amplitude distribution — the trace is noise-shaped |
+| ≫ 3             | —    | Leptokurtic: heavy tails from impulsive motion / contact-loss spikes |
+| < 1.5           | —    | Sub-sinusoidal, bimodal: clipping, ADC saturation, squared-off waveform |
+
+**Dashboard thresholds (from `_grade_ksqi_text`):**
+
+| KSQI value  | Grade label    | Meaning                                                              |
+|-------------|----------------|----------------------------------------------------------------------|
+| < 1.2       | **bad**        | Far below the sinusoid floor — bimodal, clipping or ADC saturation    |
+| 1.2 – 1.5   | **borderline** | Below the sinusoid floor — squared-off or partially clipped           |
+| 1.5 – 2.5   | **very good**  | Clean-PPG band around 2 (Elgendi's excellent class ±2 SD ≈ 1.74–2.38) |
+| 2.5 – 3.0   | **good**       | Slightly peaked but still pulse-dominated                             |
+| 3.0 – 5.0   | **borderline** | At/above Gaussian — pulse no longer dominates the distribution        |
+| > 5.0       | **bad**        | Heavy-tailed — impulsive motion / contact-loss spikes                 |
+| not finite  | **undefined**  | Signal too short or constant                                          |
+
+The band edges come from the two analytic reference points (1.5, 3.0) bracketing Elgendi's measured excellent-class range; 1.2 and 5.0 are the outer guards for saturation and spike-dominance respectively. They are dashboard reading aids, **not** literature-fixed cut-offs — Elgendi reports no threshold for KSQI.
+
+**Why it earns a column next to SSQI.** It is the only one of the three indices that reacts to *impulsive* artifact. A single large motion spike barely moves ZSQI (it's a handful of samples out of thousands) and can even *raise* SSQI (a positive spike looks like extra right-skew), but it drives KSQI sharply up. SSQI answers "is the pulse shaped right", KSQI answers "is the variance coming from the pulse or from a few outliers".
+
+**Honest caveat.** Elgendi (2016) ranked KSQI **last** of eight PPG SQIs for discriminating rated quality classes — F1 38.9–73.7% versus SSQI's 74.7–85.8% — because the three classes' means (excellent 2.06 ± 0.16, acceptable 1.97 ± 0.08, unfit 2.01 ± 0.13) overlap heavily on 60 s finger recordings. Treat KSQI as a diagnostic for *why* a channel is bad rather than as evidence *that* it is. Like SSQI and ZSQI it is an **outcome variable** in this study and is never used to filter recordings — see [`sqi/validity.py`](../sqi/validity.py) for why gating on a quality metric would make the site / skin-tone comparison circular. It is likewise deliberately excluded from the channel verdict roll-up in `interpret_channel`.
+
+**References.**
+- Elgendi, M. (2016). Optimal signal quality index for photoplethysmogram signals. *Bioengineering*, 3(4), 21. doi:[10.3390/bioengineering3040021](https://doi.org/10.3390/bioengineering3040021) — KSQI equation, per-class values (Table 2), and the F1 comparison against the other seven SQIs.
+- Nguyen, K. et al. (2022). vital_sqi: A Python package for physiological signal quality control. *Frontiers in Physiology*, 13, 1020458. doi:[10.3389/fphys.2022.1020458](https://doi.org/10.3389/fphys.2022.1020458) — same Pearson-form kurtosis SQI, per segment or per beat.
+- Selvaraj, N. et al. (2011). Statistical approach for the detection of motion/noise artifacts in photoplethysmogram. *IEEE EMBC 2011*, 4972–4975. doi:[10.1109/IEMBS.2011.6091232](https://doi.org/10.1109/IEMBS.2011.6091232) — kurtosis + Shannon entropy for PPG motion-artifact detection (99.0% / 94.8% / 93.3% accuracy at ear / finger / forehead).
 
 ---
 
@@ -166,8 +212,8 @@ Additional flags surfaced in the verdict text:
 Surface these whenever you quote numbers from the dashboard — the methods section of the manuscript-in-preparation specifies things the current code does not yet do. Tracked in `memory/project_code_paper_gaps.md`.
 
 1. **Sample rate.** Paper claims 750 Hz. Firmware (`fullpipico.py`, `pipico_code/ppgcode/main.py`) calls `set_sample_rate(3200)` with `set_fifo_average(8)`, giving ≈ 400 Hz per channel — further reduced by round-robin servicing across active lanes. The dashboard reports the *actually inferred* fs (typically ~130 Hz per active lane) in the SQI table and in `_grade_ccc_text` notes when fs < 250 Hz.
-2. **ECG R-peak detector.** Paper specifies Pan–Tompkins. `sqi/ccc.py:detect_r_peaks` is a prominence-based detector on the raw ECG (polarity orientation from robust percentiles, `prominence = 0.35×(p99−p40)`, 0.28 s refractory) — *not* Pan–Tompkins. It is chosen for these high-SNR seated recordings, where it matches a Pan–Tompkins implementation on beat count with equal-or-lower RR variability and places markers exactly on the R-peak tips; results may differ on noisy/ambulatory beats.
-3. **HRV frequency domain.** Paper specifies Lomb–Scargle for LF/HF. `webapp/analysis.py` now computes LF/HF per channel via `pyhrv.welch_psd` (Welch on cubic-spline-resampled NN) so the per-session HR/SDNN/LF-HF agreement tables match the canonical `old/PPGanalysis.py` pipeline; the legacy `signal_visualization/ppgvis.py` has been deprecated and replaced with an import-raising stub.
+2. **ECG R-peak detector.** Paper specifies Pan–Tompkins. `sqi/ccc.py:detect_r_peaks` is a prominence-based detector on the raw ECG (polarity orientation from robust percentiles with a 1.2× decisive-margin guard, `prominence = 0.35×(p99−p40)`, 0.28 s refractory) — *not* Pan–Tompkins. It is chosen for these high-SNR seated recordings, where it matches a Pan–Tompkins implementation on beat count with equal-or-lower RR variability and places markers exactly on the R-peak tips; results may differ on noisy/ambulatory beats.
+3. **HRV frequency domain.** Paper specifies Lomb–Scargle for LF/HF. `webapp/analysis.py` now computes LF/HF per channel via `scipy.signal.welch` (Welch on cubic-spline-resampled, linear-detrended NN — the same method the former `pyhrv.welch_psd` call documented, reimplemented because pyhrv is unbuildable here and its absence silently NaN'd every LF/HF value) so the per-session HR/SDNN/LF-HF agreement tables match the canonical `old/PPGanalysis.py` pipeline; the legacy `signal_visualization/ppgvis.py` has been deprecated and replaced with an import-raising stub.
 4. **PPG bandpass + peak detector.** Paper specifies a 0.5–4.0 Hz fourth-order zero-phase Butterworth. Code uses `sqi/ccc.py:ppg_bandpass(low=0.5, high=8.0, order=2)` — a **0.5–8 Hz, 2nd-order** filter, not 0.5–4 Hz / 4th-order — shared by detection and the display overlay (`webapp/analysis.py:ppg_bandpass` delegates to it, so the same waveform feeds detection and display). The active systolic-peak detector is the Elgendi 2013 TERMA two-moving-average detector (`webapp/analysis.py:detect_ppg_peaks_terma`, selected by `PPG_PEAK_DETECTOR="terma"`): band-pass → clip+square → moving averages over 111 ms and 667 ms → adaptive block threshold → per-block band-passed max → 0.6×median-RR doublet filter. A scale-relative `find_peaks` variant (`detect_ppg_peaks_bp`) sits behind the same switch. Reconcile the band edges/order and the detector name with the manuscript before quoting.
 5. **Per-site Bland–Altman across the cohort.** Now wired by the dashboard's batch view (per-site aggregate table), but the FST × site cross-tab the manuscript promises is blocked until participant.json carries a Fitzpatrick grade for every session. The batch view's meta-grid shows `FST strata: unavailable` until at least one session has FST saved.
 

@@ -36,6 +36,7 @@ CCC FORMULA (Lin, 1989):
 
 import sys
 import os
+import warnings
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks, butter, filtfilt
@@ -113,6 +114,9 @@ def ppg_bandpass(sig, fs, low=0.5, high=8.0, order=2):
 _R_REFRACTORY_S = 0.28    # min spacing between beats (caps ~214 bpm); also the
                           # guard that drops the T-wave following each R-peak
 _R_PROMINENCE_FRAC = 0.35  # peak must stand out by 35% of the robust R-amplitude
+_R_ORIENTATION_MIN_RATIO = 1.2  # min (larger/smaller) ratio between the two
+                                # percentile distances below before we trust
+                                # the polarity call -- see detect_r_peaks.
 
 
 def detect_r_peaks(ecg, fs):
@@ -125,7 +129,14 @@ def detect_r_peaks(ecg, fs):
 
       1. Polarity — orient the trace from robust 1st/99th percentiles so the
          R-peak points up, covering an inverted lead. Percentiles (not raw
-         min/max) so one artifact spike can't flip the whole recording.
+         min/max) so one artifact spike can't flip the whole recording. When
+         the two percentile distances are within _R_ORIENTATION_MIN_RATIO of
+         each other (R and S amplitudes are nearly tied), that comparison is
+         too close to call, so we default to upright rather than trust a
+         coin-flip margin — every recording seen on this rig resolves to
+         upright once genuinely asymmetric, and a wrong flip here silently
+         relocates every peak onto the S-wave. Emits a warning when this
+         fallback fires so an ambiguous session can be reviewed.
       2. Scale-relative threshold — ``find_peaks`` ``prominence`` measured
          against the recording's own R-amplitude (99th minus 40th percentile
          of the oriented signal). Prominence is how far a peak rises above the
@@ -162,11 +173,23 @@ def detect_r_peaks(ecg, fs):
     if not np.isfinite(fs) or fs <= 0 or len(ecg) < 3:
         return np.array([], dtype=int)
 
-    # Orient so R-peaks point up (handles an inverted lead).
+    # Orient so R-peaks point up (handles an inverted lead), but only act on
+    # the percentile asymmetry when it's decisive -- see point 1 above.
     median = float(np.median(ecg))
-    if abs(np.percentile(ecg, 1) - median) > abs(np.percentile(ecg, 99) - median):
+    dist_low = abs(np.percentile(ecg, 1) - median)
+    dist_high = abs(np.percentile(ecg, 99) - median)
+    lo, hi = min(dist_low, dist_high), max(dist_low, dist_high)
+    ratio = (hi / lo) if lo > 0 else float("inf")
+    if dist_low > dist_high and ratio >= _R_ORIENTATION_MIN_RATIO:
         oriented = -ecg
     else:
+        if dist_low > dist_high:
+            warnings.warn(
+                "detect_r_peaks: polarity margin too close to call "
+                f"(ratio={ratio:.3f} < {_R_ORIENTATION_MIN_RATIO}); "
+                "defaulting to upright orientation instead of flipping.",
+                stacklevel=2,
+            )
         oriented = ecg
 
     # Robust R-amplitude: top of the R-peaks (99th pct) above the signal bulk

@@ -34,7 +34,7 @@ Goal-oriented walkthroughs. If you want a feature-by-feature manual instead, rea
 
 1. Click **▦ Analyze all sessions** at the top of the Sessions sidebar.
 2. The detail column switches to the batch view. The first block is the plain-English **Batch interpretation** ("Across N sessions and M body sites: best site is finger (mean CCC 0.20, only poor agreement)").
-3. **Per-site aggregate** table below — mean ± std for SSQI, ZSQI, CCC, ICC, Pearson, bias, LOA span, RMSE, MAE. Click any column header to sort ▴/▾.
+3. **Per-site aggregate** table below — mean ± std for SSQI, ZSQI, KSQI, CCC, ICC, Pearson, bias, LOA span, RMSE, MAE. Click any column header to sort ▴/▾.
 4. **Per-session × per-channel** at the bottom — every channel of every session, grouped under sticky session-header rows. Click a session ID to drill into the per-session view.
 
 **Where the result lives:** `MDPIdata/batch_analyses/batch_<ts>.json`. A `batch_analysis_included` event is also appended to every included session's `history.jsonl`.
@@ -48,6 +48,7 @@ Read the **plain-English interpretation block** above the SQI table — for that
 > **WARN** ch0 (finger) — poor agreement, inspect before using
 > - SSQI +0.85 — positive skew, pulse shape is recognisable.
 > - ZSQI 0.030 (σ 0.008) — low, stable zero-crossing rate, sensor contact looks consistent.
+> - KSQI 2.14 — in the clean-PPG band around 2 (Elgendi 2016: 2.06±0.16 for excellent finger PPG).
 > - CCC 0.620, ICC 0.620 — poor agreement (Lin 1989: <0.90).
 > - Bland-Altman bias +12.3 ms — within typical PTT range; ±LOA span 220 ms, RMSE 38.5 ms.
 > - *Look at the PPG trace for ectopic beats, missed peaks, or motion bursts.*
@@ -56,9 +57,11 @@ For the full threshold tables (good/ok/warn/bad cut-offs for each metric), read 
 
 ---
 
-## "I want to dump the per-site aggregate as CSV"
+## "I want the batch tables in Word / Excel"
 
-In the batch view header, click **⤓ Export CSV**. Downloads `per_site_<batch_id>.csv` with one row per body site and one column per metric (mean and std separated).
+In the batch view header, click **⤓ Export CSV**. Downloads `<batch_id>.csv` containing **every table in the view** — per-site, HR, SDNN, LF/HF, the same four repeated for each skin-tone band, and per-session × per-channel — as separate blocks, each with a title row and separated by a blank line.
+
+To get one into Word as a real table: open the CSV in Excel, select the block you want, copy, then paste into Word. Cells arrive pre-formatted exactly as the dashboard shows them (`2.728 ± 1.206`), so nothing needs reassembling. Pasting straight from the browser instead tends to collapse a table's rows into a single run of text — go via the CSV.
 
 ---
 

@@ -1,10 +1,12 @@
-"""Smoke tests for sqi/ccc.py and sqi/SSQI_algorithm.py.
+"""Smoke tests for sqi/ccc.py, sqi/SSQI_algorithm.py and sqi/KSQI_algorithm.py.
 
 These are intentionally small — the SQI module is already exercised
 indirectly through the analysis tests. The goal here is to fence the
 *shape* of the public API (return types, lengths) so a refactor on
 that side surfaces fast.
 """
+
+import warnings
 
 import numpy as np
 import pytest
@@ -19,6 +21,7 @@ from sqi.ccc import (
     match_intervals,
     peaks_to_intervals,
 )
+from sqi.KSQI_algorithm import Ksqi
 from sqi.SSQI_algorithm import Ssqi
 
 
@@ -99,6 +102,55 @@ class TestPeakDetectors:
         assert isinstance(peaks, np.ndarray)
         assert peaks.dtype.kind in ("i", "u")
         assert len(peaks) > 0
+
+
+# ── R-peak polarity guard ───────────────────────────────────────────────────
+
+class TestRPeakPolarity:
+    """detect_r_peaks flips the trace when the 1st-percentile excursion beats
+    the 99th. That comparison is only trustworthy with a decisive margin —
+    _R_ORIENTATION_MIN_RATIO — because a wrong flip silently relocates every
+    peak onto the S-wave rather than failing loudly."""
+
+    def _peak_signs(self, sig, peaks):
+        """Sign of the signal at each detected peak, relative to its median.
+        Positive => detector landed on upward deflections (R-waves)."""
+        return np.sign(sig[peaks] - np.median(sig))
+
+    def test_clearly_inverted_ecg_is_still_flipped(self, synth_inverted_ecg):
+        # The guard must not break the case it is guarding: a genuinely
+        # inverted lead has a decisive margin and still gets corrected.
+        sig, fs = synth_inverted_ecg["ecg"], synth_inverted_ecg["fs"]
+        peaks = detect_r_peaks(sig, fs)
+        assert len(peaks) > 0
+        # Peaks sit on the (downward) R-deflections of the inverted trace.
+        assert (self._peak_signs(sig, peaks) < 0).all()
+
+    def test_ambiguous_polarity_defaults_upright_and_warns(
+            self, synth_ambiguous_polarity_ecg):
+        sig, fs = (synth_ambiguous_polarity_ecg["ecg"],
+                   synth_ambiguous_polarity_ecg["fs"])
+        with pytest.warns(UserWarning, match="polarity margin too close"):
+            peaks = detect_r_peaks(sig, fs)
+        assert len(peaks) > 0
+        # Upright: every detected peak is an upward deflection (the R-wave),
+        # not the marginally-deeper S-wave that would win a naive comparison.
+        assert (self._peak_signs(sig, peaks) > 0).all()
+
+    def test_clean_upright_ecg_does_not_warn(self, synth_signal_arrays):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")   # any warning fails the test
+            peaks = detect_r_peaks(synth_signal_arrays["ecg"],
+                                   synth_signal_arrays["fs"])
+        assert len(peaks) > 0
+
+    def test_single_negative_spike_does_not_invert(self, synth_single_spike_ecg):
+        # Percentile-based orientation (not raw min/max) means one artifact
+        # can't flip a recording — guard kept from the original detector.
+        sig, fs = synth_single_spike_ecg["ecg"], synth_single_spike_ecg["fs"]
+        peaks = detect_r_peaks(sig, fs)
+        assert len(peaks) > 0
+        assert (self._peak_signs(sig, peaks) > 0).all()
 
 
 # ── intervals ───────────────────────────────────────────────────────────────
@@ -196,3 +248,38 @@ class TestSSQI:
         sig = -rng.chisquare(df=2, size=5000)
         s = Ssqi(sig)
         assert s < -0.5
+
+
+# ── KSQI ────────────────────────────────────────────────────────────────────
+
+class TestKSQI:
+    """KSQI = Pearson (non-excess) kurtosis, so Gaussian scores 3.0 and a
+    pure sinusoid 1.5 (Elgendi 2016: clean finger PPG ≈ 2.06 ± 0.16)."""
+
+    def test_gaussian_is_three_not_zero(self):
+        rng = np.random.default_rng(0)
+        sig = rng.standard_normal(200000)
+        # Non-excess form: Gaussian → 3.0. A -3 correction would land near 0
+        # and every dashboard band would be off by 3.
+        assert abs(Ksqi(sig) - 3.0) < 0.1
+
+    def test_sinusoid_is_three_halves(self):
+        # Analytic floor for a smooth periodic wave: kurtosis(sin) = 1.5.
+        t = np.linspace(0, 200 * np.pi, 200000, endpoint=False)
+        assert abs(Ksqi(np.sin(t)) - 1.5) < 0.01
+
+    def test_impulsive_spike_raises_ksqi(self):
+        # The property SSQI/ZSQI miss: one big outlier must push KSQI well
+        # past Gaussian even though it barely moves the other two indices.
+        t = np.linspace(0, 200 * np.pi, 200000, endpoint=False)
+        clean = np.sin(t)
+        spiked = clean.copy()
+        spiked[100000] = 60.0
+        assert Ksqi(spiked) > 5.0
+        assert Ksqi(clean) < Ksqi(spiked)
+
+    def test_clipped_square_wave_below_sinusoid(self):
+        # Bimodal (rail-to-rail) distribution → kurtosis 1.0, the saturation
+        # signature the "bad" low band is meant to catch.
+        sig = np.sign(np.sin(np.linspace(0, 200 * np.pi, 200000, endpoint=False)))
+        assert Ksqi(sig) < 1.2

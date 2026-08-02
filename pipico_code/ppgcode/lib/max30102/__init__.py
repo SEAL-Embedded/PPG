@@ -695,6 +695,30 @@ class MAX30102(object):
         else:
             return False
 
+    # Direct FIFO access used by fullpipico.py's interleaved drain. Unlike
+    # check() (which drains the whole FIFO into self.sense in one burst with
+    # no chance to service ECG in between), these let the caller read the
+    # FIFO one sample at a time and re-check the ECG cadence between reads,
+    # which is what keeps ECG from being starved during a long PPG drain.
+    def fifo_available(self):
+        # Read the FIFO pointers and return how many unread samples the chip
+        # currently holds (0..31). Does NOT touch self.sense; drain them with
+        # read_fifo_sample() called exactly this many times.
+        read_pointer = ord(self.get_read_pointer())
+        write_pointer = ord(self.get_write_pointer())
+        number_of_samples = write_pointer - read_pointer
+        if number_of_samples < 0:
+            number_of_samples += 32
+        return number_of_samples
+
+    def read_fifo_sample(self):
+        # Read exactly one sample (activeLEDs*3 bytes) from the FIFO and
+        # return its RED value, advancing the chip's read pointer by one.
+        # Only valid while fifo_available() reported >=1 remaining.
+        fifo_bytes = self.i2c_read_register(MAX30105_FIFO_DATA,
+                                            self._multi_led_read_mode)
+        return self.fifo_bytes_to_int(fifo_bytes[0:3])
+
     # Check for new data but give up after a certain amount of time
     def safe_check(self, max_time_to_check):
         mark_time = ticks_ms()
