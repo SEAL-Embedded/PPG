@@ -8,15 +8,16 @@ This document explains every signal-quality metric the dashboard reports, the li
 2. [SSQI — skewness](#ssqi--skewness)
 3. [ZSQI — zero-crossing rate](#zsqi--zero-crossing-rate)
 4. [KSQI — kurtosis](#ksqi--kurtosis)
-5. [CCC — Lin's concordance correlation coefficient](#ccc--lins-concordance-correlation-coefficient)
-6. [ICC — intraclass correlation, ICC(A,1)](#icc--intraclass-correlation-icca1)
-7. [Bland-Altman — bias, LOA, RMSE, MAE](#bland-altman--bias-loa-rmse-mae)
-8. [Channel verdict roll-up](#channel-verdict-roll-up)
-9. [Site verdict roll-up](#site-verdict-roll-up)
-10. [Known code-vs-manuscript gaps](#known-code-vs-manuscript-gaps)
-11. [Per-HRV-feature CCC (Σ page)](#per-hrv-feature-ccc-σ-page)
-12. [Ectopic-beat / NN-interval cleaning](#ectopic-beat--nn-interval-cleaning)
-13. [ticks_us rollover unwrap](#ticks_us-rollover-unwrap)
+5. [Recording acceptance](#recording-acceptance)
+6. [CCC — Lin's concordance correlation coefficient](#ccc--lins-concordance-correlation-coefficient)
+7. [ICC — intraclass correlation, ICC(A,1)](#icc--intraclass-correlation-icca1)
+8. [Bland-Altman — bias, LOA, RMSE, MAE](#bland-altman--bias-loa-rmse-mae)
+9. [Channel verdict roll-up](#channel-verdict-roll-up)
+10. [Site verdict roll-up](#site-verdict-roll-up)
+11. [Known code-vs-manuscript gaps](#known-code-vs-manuscript-gaps)
+12. [Per-HRV-feature CCC (Σ page)](#per-hrv-feature-ccc-σ-page)
+13. [Ectopic-beat / NN-interval cleaning](#ectopic-beat--nn-interval-cleaning)
+14. [ticks_us rollover unwrap](#ticks_us-rollover-unwrap)
 
 ---
 
@@ -103,12 +104,55 @@ The band edges come from the two analytic reference points (1.5, 3.0) bracketing
 
 **Why it earns a column next to SSQI.** It is the only one of the three indices that reacts to *impulsive* artifact. A single large motion spike barely moves ZSQI (it's a handful of samples out of thousands) and can even *raise* SSQI (a positive spike looks like extra right-skew), but it drives KSQI sharply up. SSQI answers "is the pulse shaped right", KSQI answers "is the variance coming from the pulse or from a few outliers".
 
-**Honest caveat.** Elgendi (2016) ranked KSQI **last** of eight PPG SQIs for discriminating rated quality classes — F1 38.9–73.7% versus SSQI's 74.7–85.8% — because the three classes' means (excellent 2.06 ± 0.16, acceptable 1.97 ± 0.08, unfit 2.01 ± 0.13) overlap heavily on 60 s finger recordings. Treat KSQI as a diagnostic for *why* a channel is bad rather than as evidence *that* it is. Like SSQI and ZSQI it is an **outcome variable** in this study and is never used to filter recordings — see [`sqi/validity.py`](../sqi/validity.py) for why gating on a quality metric would make the site / skin-tone comparison circular. It is likewise deliberately excluded from the channel verdict roll-up in `interpret_channel`.
+**Honest caveat.** Elgendi (2016) ranked KSQI **last** of eight PPG SQIs for discriminating rated quality classes — F1 38.9–73.7% versus SSQI's 74.7–85.8% — because the three classes' means (excellent 2.06 ± 0.16, acceptable 1.97 ± 0.08, unfit 2.01 ± 0.13) overlap heavily on 60 s finger recordings. Treat KSQI as a diagnostic for *why* a channel is bad rather than as evidence *that* it is. Like SSQI and ZSQI it is an **outcome variable** in this study and is never used to filter recordings — gating on a quality metric would select on the dependent variable and make the site / skin-tone comparison circular. It is likewise deliberately excluded from the channel verdict roll-up in `interpret_channel`. See [Recording acceptance](#recording-acceptance) for why no gate is applied at all.
 
 **References.**
 - Elgendi, M. (2016). Optimal signal quality index for photoplethysmogram signals. *Bioengineering*, 3(4), 21. doi:[10.3390/bioengineering3040021](https://doi.org/10.3390/bioengineering3040021) — KSQI equation, per-class values (Table 2), and the F1 comparison against the other seven SQIs.
 - Nguyen, K. et al. (2022). vital_sqi: A Python package for physiological signal quality control. *Frontiers in Physiology*, 13, 1020458. doi:[10.3389/fphys.2022.1020458](https://doi.org/10.3389/fphys.2022.1020458) — same Pearson-form kurtosis SQI, per segment or per beat.
 - Selvaraj, N. et al. (2011). Statistical approach for the detection of motion/noise artifacts in photoplethysmogram. *IEEE EMBC 2011*, 4972–4975. doi:[10.1109/IEMBS.2011.6091232](https://doi.org/10.1109/IEMBS.2011.6091232) — kurtosis + Shannon entropy for PPG motion-artifact detection (99.0% / 94.8% / 93.3% accuracy at ear / finger / forehead).
+
+---
+
+## Recording acceptance
+
+**No recording-acceptance gate is applied. Every recording is reported.**
+Nothing is filtered, excluded, or down-weighted before the SQIs, the agreement
+statistics, the site ranking, or the skin-tone stratification are computed. If a
+channel is bad, it appears in the tables as bad.
+
+This is a deliberate decision (2026-08-03), not an unfinished step.
+
+**Why.** The obvious filter would be the SQIs themselves, and that is ruled out
+immediately: SSQI, ZSQI and KSQI are the study's *outcome variables* — they are
+how sites and skin tones are ranked — so filtering on them would select on the
+dependent variable.
+
+The subtler candidate was a timing-only plausibility gate (Orphanidou 2015: HR
+in [40, 180] bpm, no inter-beat gap > 3 s, max/min interval ratio < 2.2, judged
+per 10 s window). It conditions only on beat timing, never on morphology, so it
+sidesteps the circularity above. An implementation lives in
+[`sqi/validity.py`](../sqi/validity.py) — **unused, retained for reference**.
+
+It was rejected because it reintroduces the same problem one level down: the
+primary agreement outcomes (CCC, ICC, Bland-Altman) are *themselves* beat-timing
+quantities. At a site where PPG beat detection fails, a timing gate removes
+exactly the windows where it failed, so that site's agreement gets computed only
+over the windows where detection happened to work. The worst-performing sites
+would be flattered, the between-site differences the study exists to measure
+would compress, and the result is difficult for a reviewer to distinguish from
+post-hoc data selection.
+
+**What this means when reading the tables.** N in equals N analysed: 20 sessions
+× 5 channels = 100 channel-recordings, all reported. There is no exclusion
+ledger because nothing is excluded. The per-channel verdict grade
+(good / ok / warn / bad) is a *reading aid* computed from CCC and matched-beat
+count — it colours rows, it does not remove them, and no downstream number is
+conditioned on it.
+
+**If this is ever revisited**, the two things to settle first are whether the
+gate applies only to the shared ECG reference (much safer — a bad reference is
+bad for every channel equally) rather than per-PPG-channel, and the
+`VALIDATION PENDING` threshold note in `sqi/validity.py`.
 
 ---
 

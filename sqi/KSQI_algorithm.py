@@ -41,8 +41,10 @@ Caveat worth knowing before leaning on it
 Elgendi 2016 ranked KSQI *last* of eight PPG SQIs for discriminating rated
 quality classes (F1 38.9-73.7% vs SSQI's 74.7-85.8%) — the three quality
 classes' KSQI means (2.06 / 1.97 / 2.01) overlap heavily. It is reported here
-as an outcome variable alongside SSQI and ZSQI, never as an inclusion filter
-(see ``sqi/validity.py`` for why quality metrics must not gate this study).
+as an outcome variable alongside SSQI and ZSQI, never as an inclusion filter:
+gating on it would select on the dependent variable and make the site /
+skin-tone comparison circular. No recording-acceptance gate is applied in this
+study at all — every recording is reported.
 KSQI does carry information the other two miss — it is the only one of the
 three that reacts to *impulsive* artifact (a single large motion spike barely
 moves ZSQI and can even raise SSQI) — which is why it earns a column.

@@ -1,14 +1,30 @@
 """
 Physiological-plausibility validity gate (neutral signal acceptance).
 
-This is the Tier-1 acceptance check for the PPG-vs-ECG agreement study. It
-decides whether a stretch of beats is *physiologically possible*, NOT whether
-its morphology is clean. That distinction is the whole point: skewness (SSQI)
-and zero-crossing rate (ZSQI) are OUTCOME variables in this study (they are how
-we rank body sites / skin tones for signal quality), so they must never be used
-as an inclusion filter — doing so would select on the dependent variable and
-make the site/skin-tone comparison circular. The checks here condition only on
-beat timing, so they are safe to use as a gate.
+===============================================================================
+NOT WIRED INTO THE PIPELINE — RETAINED FOR REFERENCE ONLY.
+===============================================================================
+
+Nothing imports this module. The study reports every recording without a
+plausibility gate, and that is a deliberate decision, not an oversight or an
+unfinished step: see the "Why this is not used" section below before wiring it
+into anything. If you do decide to enable it, the change is a methods-section
+change first and a code change second — it alters which recordings the
+manuscript's numbers are computed over.
+
+Kept in the tree because the reasoning and the literature transcription are
+worth preserving if the acceptance question is ever revisited.
+
+-------------------------------------------------------------------------------
+
+What it would do, if used: it decides whether a stretch of beats is
+*physiologically possible*, NOT whether its morphology is clean. That
+distinction is the whole point: skewness (SSQI), zero-crossing rate (ZSQI) and
+kurtosis (KSQI) are OUTCOME variables in this study (they are how we rank body
+sites / skin tones for signal quality), so they must never be used as an
+inclusion filter — doing so would select on the dependent variable and make the
+site/skin-tone comparison circular. The checks here condition only on beat
+timing, which is what made them a candidate for a non-circular gate.
 
 The three rules are the physiological-plausibility half of the Orphanidou 2015
 signal-quality index (we deliberately DROP its template-correlation term, which
@@ -26,8 +42,32 @@ interpretation (no double-counting) for the eventual N -> M flow accounting.
 
 This is intentionally a WEAK gate: it removes only the truly unanalyzable
 stretches (no detectable beats, impossible rates, huge dropouts) while keeping
-noisy-but-analyzable signal — which is correct here, because that noisy signal
-carries the quality variation the study exists to measure.
+noisy-but-analyzable signal.
+
+Why this is not used
+--------------------
+Decided 2026-08-03, after reviewing the acceptance question directly.
+
+The gate is computed on beat timing — and the study's primary agreement
+outcomes (CCC, ICC, Bland-Altman on matched RR vs PPI) are *also* beat-timing
+quantities. Gating on timing before measuring timing agreement is a second,
+less obvious form of the circularity this module was written to avoid: at a
+site where PPG beat detection fails, the gate would drop precisely the windows
+where it failed, and that site's agreement would then be computed only over the
+windows where detection happened to work. That inflates the worst-performing
+sites and compresses the between-site differences the study exists to report —
+the opposite of the intended effect, and hard to distinguish from post-hoc data
+selection when a reviewer looks at it.
+
+Reporting every recording ungated keeps the site and skin-tone comparisons
+honest: a site that fails does so visibly, in the numbers, rather than being
+quietly thinned until it looks acceptable. The quality variation the noisy
+recordings carry IS the measurement here.
+
+If this is ever revisited, the two things to settle first are (a) whether the
+gate applies to the shared ECG reference only — much safer, since a bad
+reference is bad for every channel equally — rather than per-PPG-channel, and
+(b) the VALIDATION PENDING note below.
 
 Reference
 ---------
