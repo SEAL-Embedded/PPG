@@ -14,7 +14,8 @@ import os
 import numpy as np
 import pytest
 
-from webapp import sessions, sleepiness
+from depereciated import sleepiness
+from webapp import sessions
 
 
 # ── HRV features on bare RR arrays ──────────────────────────────────────────

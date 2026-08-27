@@ -41,7 +41,7 @@ from sqi.ccc import (
     peaks_to_intervals,
 )
 
-from . import analysis, sessions
+from ..webapp import analysis, sessions
 
 # Pre-registered weights — DO NOT FIT. Their sign and magnitude come from
 # the cited papers; using cohort-fitted weights here would manufacture
